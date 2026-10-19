@@ -1,0 +1,3 @@
+[submodule "app/vendor/moniker-sdk"]
+	path = app/vendor/moniker-sdk
+	url = https://github.com/adalinxx/moniker-sdk

@@ -1,0 +1,61 @@
+name: Test
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  client:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: node --test client/*.test.mjs
+
+  # The page in Chromium with the real Selfhold extension, against a private
+  # Lattice stack. Runs inside the node image, which carries the lattice
+  # binaries; bump the pin to test against a newer node.
+  ui:
+    runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/adalinxx/lattice-node:sha-ba52754@sha256:a16e5f615493101411538fc7b54eb43e3150ea2fdf9422937bbe3a44a0411682
+      options: --user root
+    timeout-minutes: 30
+    steps:
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      # The node image has no git, which a checkout with submodules needs.
+      - run: apt-get update -qq && apt-get install -y -qq git
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+      # Selfhold, at a pinned commit.
+      - uses: actions/checkout@v4
+        with:
+          repository: adalinxx/lattice-wallet
+          ref: d45f1ead813bf1ff83b55267bd2f242619d6d321
+          path: lattice-wallet
+          submodules: recursive
+      - name: Build Selfhold
+        working-directory: lattice-wallet
+        run: |
+          npm ci --no-audit --no-fund
+          npm run build
+      - name: Install Playwright's Chromium
+        working-directory: e2e/ui
+        run: |
+          npm ci --no-audit --no-fund
+          npx playwright install --with-deps chromium
+      - name: UI tests
+        working-directory: e2e/ui
+        env:
+          LATTICE: /usr/local/bin/lattice
+          LATTICE_WALLET: ${{ github.workspace }}/lattice-wallet/dist
+        run: npm test
