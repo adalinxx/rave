@@ -94,6 +94,7 @@ export function metres(m) {
  *   #/                         Explore
  *   #/place/<author>/<id>      a place
  *   #/place/<author>/<id>/review  write or edit your review
+ *   #/place/<author>/<id>/edit    edit a place you added
  *   #/add                      add a place
  *   #/following, #/you, #/settings
  *   #/u/<address>              a reviewer
@@ -108,7 +109,7 @@ export function parseRoute(hash) {
   };
   const parts = hash.replace(/^#\/?/, "").split("?")[0].split("/").filter(Boolean).map(decode);
   const [head, a, b, c] = parts;
-  if (head === "place" && a && b) return { view: c === "review" ? "write" : "place", place: { author: a, id: b } };
+  if (head === "place" && a && b) return { view: c === "review" ? "write" : c === "edit" ? "edit" : "place", place: { author: a, id: b } };
   if (head === "u" && a) return { view: "reviewer", address: a };
   if (["add", "following", "you", "settings"].includes(head)) return { view: head };
   return { view: "explore" };

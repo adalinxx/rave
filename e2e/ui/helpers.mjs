@@ -12,7 +12,7 @@ export function newAccount() {
 }
 const accountOf = (who) => sdk.accountFromPrivateKey(Uint8Array.from(Buffer.from(who.keyHex, "hex")));
 
-async function until(label, condition, seconds = 180) {
+async function until(label, condition, seconds = 900) {
   const deadline = Date.now() + seconds * 1000;
   for (;;) {
     if (await condition().catch(() => false)) return;
@@ -34,12 +34,17 @@ export async function writeAs(node, chain, who, records) {
   const account = await (await fetch(`${node}/api/state/account/${who.address}?chainPath=${chain}`)).json().catch(() => ({}));
   const body = write.transaction({ owner: who.address, actions, fee: 0n, nonce: BigInt(account?.nonce ?? 0), chainPath: path });
   const { publicKey, signature } = sdk.signTransactionBody(body, accountOf(who).privateKey);
-  const r = await fetch(`${node}/transactions`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(sdk.transactionPayload({ [publicKey]: signature }, body)),
-  });
-  if (!r.ok) throw new Error(`submit: ${r.status} ${await r.text()}`);
+  // A public node limits how fast it takes submissions: wait and send again.
+  for (let attempt = 0; ; attempt++) {
+    const r = await fetch(`${node}/transactions`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(sdk.transactionPayload({ [publicKey]: signature }, body)),
+    });
+    if (r.ok) break;
+    if (r.status !== 429 || attempt >= 20) throw new Error(`submit: ${r.status} ${await r.text()}`);
+    await new Promise((resolve) => setTimeout(resolve, 1000 * (Number(r.headers.get("retry-after")) || 1 + attempt)));
+  }
   await until("records land", async () => {
     const now = await state();
     for (const { key, newValue } of actions) if ((await now.get(key)) !== newValue) return false;

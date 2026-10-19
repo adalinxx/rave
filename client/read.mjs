@@ -101,15 +101,28 @@ export async function placesIn(state, cells) {
  * names, when that record is a review of this place.
  */
 export async function reviews(state, on) {
-  const listed = await collect(state.list(`index/review/${on.author}/${on.id}/`));
+  const prefix = `index/review/${on.author}/${on.id}/`;
+  // Only `<prefix><account>` is an account's listing: the chain lets an
+  // account write deeper keys under its name too, which would count it twice.
+  const listed = (await collect(state.list(prefix))).filter(([key]) => !key.slice(prefix.length).includes("/"));
   const found = await Promise.all(
     listed.map(async ([key, rid]) => {
-      const author = key.slice(key.lastIndexOf("/") + 1);
+      const author = key.slice(prefix.length);
       const r = await recordOf(state, author, rid, "review");
       return r && r.on.author === on.author && r.on.id === on.id ? r : undefined;
     }),
   );
   return found.filter(Boolean);
+}
+
+/** One past the highest photo slot a record has: every slot to clear when it changes. */
+export async function mediaSlots(state, author, id) {
+  let slots = 0;
+  for await (const [key] of state.list(`user/${author}/post/${id}/media/`)) {
+    const n = Number(key.slice(key.lastIndexOf("/") + 1));
+    if (Number.isSafeInteger(n) && n >= 0 && n < 1000) slots = Math.max(slots, n + 1);
+  }
+  return slots;
 }
 
 /** `a`'s current review of a place, or undefined. */
@@ -121,10 +134,12 @@ export async function reviewOf(state, a, on) {
 
 /** The replies to a review or a place, oldest first. */
 export async function replies(state, on) {
-  const listed = await collect(state.list(`index/reply/${on.author}/${on.id}/`));
+  const prefix = `index/reply/${on.author}/${on.id}/`;
+  // `<prefix><reply id>/<account>`, nothing deeper.
+  const listed = (await collect(state.list(prefix))).filter(([key]) => key.slice(prefix.length).split("/").length === 2);
   const found = await Promise.all(
     listed.map(([key]) => {
-      const [xid, author] = key.split("/").slice(-2);
+      const [xid, author] = key.slice(prefix.length).split("/");
       return recordOf(state, author, xid, "reply");
     }),
   );
@@ -133,8 +148,9 @@ export async function replies(state, on) {
 
 /** The accounts that marked a review helpful. */
 export async function helpful(state, on) {
-  const listed = await collect(state.list(`index/helpful/${on.author}/${on.id}/`));
-  return new Set(listed.filter(([, value]) => value === "1").map(([key]) => key.slice(key.lastIndexOf("/") + 1)));
+  const prefix = `index/helpful/${on.author}/${on.id}/`;
+  const listed = await collect(state.list(prefix));
+  return new Set(listed.filter(([key, value]) => value === "1" && !key.slice(prefix.length).includes("/")).map(([key]) => key.slice(prefix.length)));
 }
 
 /**

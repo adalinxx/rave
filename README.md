@@ -27,7 +27,8 @@ reader's Selfhold wallet, which holds their key.
 - **Write**: stars alone are a complete review; words and up to ten photos
   are optional. Edits keep the review's date and say Edited.
 - **Add a place**: drop the pin on the door. Places already listed within
-  50 m with a similar name are offered first.
+  50 m with a similar name are offered first. Whoever added a place can
+  edit its details or move it later; nobody else can.
 - **Following**: newest reviews from the people you follow, and "Rated
   like you": people whose stars were within one of yours on places you both
   reviewed, worked out in the page.
@@ -150,7 +151,8 @@ Selfhold extension, against a private Lattice stack seeded with demo data
 the page then shows: exploring and filtering, reading a place, adding a
 place and reviewing it with a new account, nearby duplicates offered first,
 editing and deleting, declining in the wallet, helpful and replies, photos
-kept by one's own node, following, labels and their modes, duplicates,
+kept by one's own node, editing a place (its author only), labels shown as
+text never markup, following, labels and their modes, duplicates,
 labelling a place closed, "Rated like you", and the phone layout.
 
 ```sh
@@ -158,3 +160,14 @@ cd e2e/ui && npm ci && npx playwright install chromium
 LATTICE=<lattice-node>/.build/debug/lattice \
 LATTICE_WALLET=<lattice-wallet>/dist npm test
 ```
+
+`e2e/ui/live.mjs` does the same against the live trial chain from the
+published page: a new account with no coins connects Selfhold, reviews a
+place, approves the write in the wallet's window, and waits for it to land.
+
+```sh
+LATTICE_WALLET=<lattice-wallet>/dist node e2e/ui/live.mjs
+```
+
+`scripts/seed.mjs` writes the demo places and reviews (around Madison
+Square Park) to any Rave chain; the trial chain is seeded with it.

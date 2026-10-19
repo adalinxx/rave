@@ -83,6 +83,9 @@ const wallet = () => window.lattice ?? null;
 class NoWallet extends Error {}
 /** An error already in the page's words. */
 class Said extends Error {}
+/** The form was made from an older picture of the chain: it is drawn again, with this said. */
+class Redraw extends Said {}
+let redrawNote = "";
 
 function walletMessage(error) {
   const text = String(error?.message ?? error);
@@ -403,6 +406,11 @@ function ensureMap() {
     attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>',
   }).addTo(map);
   markers = L.layerGroup().addTo(map);
+  // For tests and scripted tours: move the map by [dLat, dLon].
+  window.addEventListener("rave-test-pan", (e) => {
+    const c = map.getCenter();
+    map.setView([c.lat + e.detail[0], c.lng + e.detail[1]], map.getZoom(), { animate: false });
+  });
   let timer;
   map.on("moveend", () => {
     const c = map.getCenter();
@@ -428,7 +436,9 @@ function showPins(places, { on, fit = false } = {}) {
   if (!ensureMap()) return;
   markers.clearLayers();
   for (const p of places) {
-    const marker = L.marker([p.lat, p.lon], { icon: pinIcon(on && p.author === on.author && p.id === on.id), title: p.name, keyboard: false });
+    const c = map.getCenter().lng;
+    const lon = p.lon + 360 * Math.round((c - p.lon) / 360);
+    const marker = L.marker([p.lat, lon], { icon: pinIcon(on && p.author === on.author && p.id === on.id), title: p.name, keyboard: false });
     marker.on("click", () => (location.hash = placeHref(p)));
     marker.addTo(markers);
   }
@@ -437,6 +447,19 @@ function showPins(places, { on, fit = false } = {}) {
     else map.fitBounds(places.map((p) => [p.lat, p.lon]), { padding: [40, 40], maxZoom: 16 });
   }
 }
+/** A longitude in [-180, 180). */
+const wrapLon = (lon) => ((((lon + 180) % 360) + 360) % 360) - 180;
+/** The map's view as a box in real longitudes (east < west when it spans ±180°), or null when it's the whole world. */
+function viewBox() {
+  const b = map.getBounds();
+  if (b.getEast() - b.getWest() >= 360) return null;
+  const west = wrapLon(b.getWest());
+  let east = west + (b.getEast() - b.getWest());
+  if (east >= 180) east -= 360;
+  return { south: b.getSouth(), north: b.getNorth(), west, east };
+}
+const inBox = (box, p) =>
+  p.lat >= box.south && p.lat <= box.north && (box.west <= box.east ? p.lon >= box.west && p.lon <= box.east : p.lon >= box.west || p.lon <= box.east);
 let onMapMoved = () => {};
 const mapMoved = () => onMapMoved();
 
@@ -464,9 +487,9 @@ async function render() {
   const route = parseRoute(location.hash);
   const viewChanged = shownView !== route.view + JSON.stringify(route);
   shownView = route.view + JSON.stringify(route);
-  document.body.className = `view-${route.view}${["explore", "add"].includes(route.view) ? " with-map" : ""}`;
+  document.body.className = `view-${route.view}${["explore", "add", "edit"].includes(route.view) ? " with-map" : ""}`;
   for (const tab of $$("#tabs a")) {
-    const on = tab.dataset.tab === ({ place: "explore", write: "explore", add: "explore", reviewer: "following", settings: "you" }[route.view] ?? route.view);
+    const on = tab.dataset.tab === ({ place: "explore", write: "explore", add: "explore", edit: "explore", reviewer: "following", settings: "you" }[route.view] ?? route.view);
     if (on) tab.setAttribute("aria-current", "page");
     else tab.removeAttribute("aria-current");
   }
@@ -484,7 +507,7 @@ async function render() {
   }
   const stale = () => token !== renderToken;
   try {
-    const views = { explore, place, write: writeView, add: addView, following, reviewer, you, settings: settingsView };
+    const views = { explore, place, write: writeView, add: addView, edit: addView, following, reviewer, you, settings: settingsView };
     await views[route.view](panel, route, stale, viewChanged);
   } catch (error) {
     if (stale()) return;
@@ -561,23 +584,27 @@ async function explore(panel, route, stale) {
         <span class="rating">${s.everyone.count ? `${oneStar}<span aria-label="${average(s.everyone.average)} stars from ${plural(s.everyone.count, "review")}">${average(s.everyone.average)} <span class="muted" style="font-weight:400">(${s.everyone.count})</span></span>` : `<span class="none">No reviews</span>`}</span>
       </a>`).join("");
   };
+  let loads = 0;
   const load = async () => {
     if (!map) return;
-    const b = map.getBounds();
-    const cells = geo.cover({ south: b.getSouth(), west: b.getWest(), north: b.getNorth(), east: b.getEast() });
+    // Only the newest load for the newest view may draw.
+    const mine = ++loads;
+    const box = viewBox();
+    const cells = box && geo.cover(box);
     tooWide = !cells;
     if (tooWide) return drawList();
     const s = await state();
     const who = await readerOf(s);
-    const places = (await read.placesIn(s, cells)).filter((p) => b.contains([p.lat, p.lon]));
     const center = map.getCenter();
-    const withScores = await Promise.all(places.slice(0, 80).map(async (p) => ({
-      place: p,
-      summary: trust.summary(await read.reviews(s, p), who.follows),
-      dist: geo.distance({ lat: center.lat, lon: center.lng }, p),
-    })));
-    if (stale()) return;
-    found = withScores.sort((x, y) => x.dist - y.dist);
+    const here = { lat: center.lat, lon: wrapLon(center.lng) };
+    const places = (await read.placesIn(s, cells))
+      .filter((p) => inBox(box, p))
+      .map((p) => ({ place: p, dist: geo.distance(here, p) }))
+      .sort((x, y) => x.dist - y.dist)
+      .slice(0, 80);
+    const withScores = await Promise.all(places.map(async (x) => ({ ...x, summary: trust.summary(await read.reviews(s, x.place), who.follows) })));
+    if (stale() || mine !== loads) return;
+    found = withScores;
     drawList();
   };
   onMapMoved = () => load().catch((error) => {
@@ -661,6 +688,7 @@ async function place(panel, route, stale, arrived) {
     ${bars}
     <div class="actions">
       <a class="btn" href="${placeHref(p)}/review">${mine ? "Edit your review" : "Write a review"}</a>
+      ${who.address === p.author ? `<a class="btn quiet" href="${placeHref(p)}/edit">Edit details</a>` : ""}
       <button type="button" class="btn quiet" data-label-place>Label…</button>
     </div>
     ${placeReplies.length ? `<h2 class="section-title" style="font-size:16px">Notes on this place</h2><div style="padding:0 16px"><div class="replies" style="margin-left:0">${placeReplies.map((x) => replyHTML(x)).join("")}</div></div>` : ""}
@@ -699,7 +727,7 @@ function reviewHTML(r, v, x, who) {
       <span class="hist">${plural(hist.count, "review")}${hist.since ? ` · since ${monthYear(hist.since)}` : ""} ${sparkline(hist.spread)}</span>
     </div></div>`;
   if (v.mode !== "show" && !placeUI.reveal.has(key) && !(v.mode === "hide" && placeUI.showHidden)) {
-    const why = v.labels.filter((l) => l.mode === v.mode).map((l) => `${labelText(l.label)} by ${nameTag(l.by)}`).join(", ");
+    const why = v.labels.filter((l) => l.mode === v.mode).map((l) => `${esc(labelText(l.label))} by ${nameTag(l.by)}`).join(", ");
     return `<article class="review" data-review="${esc(key)}">${head}<div class="folded" style="margin-top:8px"><span>Labelled ${why}</span><button type="button" class="linkish" data-reveal="${esc(key)}">Show</button></div></article>`;
   }
   const labelsNote = v.labels.filter((l) => l.mode !== "show").map((l) => `<span class="badge label">${esc(labelText(l.label))} · ${nameTag(l.by)}</span>`).join(" ");
@@ -888,11 +916,12 @@ async function writeView(panel, route, stale) {
           : `<p class="small muted" style="margin:0">Photos are kept by your own Lattice node, not by Rave. <a href="#/settings">Add your node in Settings</a> to attach some.</p>`}
       </div>
       <p class="small muted" style="margin:0">Your review is public and signed by your key.${mine ? " Editing keeps its date and marks it edited; earlier versions stay in the chain's history." : " You can edit or delete it later; earlier versions stay in the chain's history."}</p>
-      <p class="status" id="w-status" role="status"></p>
+      <p class="status${redrawNote ? " bad" : ""}" id="w-status" role="status">${esc(redrawNote)}</p>
       <button type="button" class="btn wide" id="post">${mine ? "Save changes" : "Post review"}</button>
       ${mine ? `<button type="button" class="linkish" id="delete" style="align-self:center;color:var(--bad)">Delete your review</button>` : ""}
     </div>`;
   if (!paint(panel, stale, html)) return;
+  redrawNote = "";
   if (matchMedia("(min-width: 900px)").matches) showPins([p], { on: p, fit: true });
   const drawStars = () => {
     $("#pick").innerHTML = [1, 2, 3, 4, 5].map((i) => `<button type="button" role="radio" aria-checked="${draft.stars === i}" aria-label="${i} of 5 stars" data-stars="${i}" tabindex="${(draft.stars || 1) === i ? 0 : -1}"><svg width="44" height="44" viewBox="0 0 24 24" aria-hidden="true"><path d="${starPath}" fill="${i <= draft.stars ? "var(--star)" : "transparent"}" stroke="${i <= draft.stars ? "var(--star)" : "var(--faint)"}" stroke-width="1.4"/></svg></button>`).join("");
@@ -967,6 +996,11 @@ async function writeView(panel, route, stale) {
         statusEl.textContent = "";
         return needWallet("Posting a review needs Selfhold.");
       }
+      if (error instanceof Redraw) {
+        drafts.delete(key);
+        redrawNote = error.message;
+        return render();
+      }
       statusEl.textContent = error instanceof Said ? error.message : walletMessage(error);
       statusEl.classList.add("bad");
     }
@@ -977,9 +1011,13 @@ async function writeView(panel, route, stale) {
     const mediaCIDs = [...draft.media];
     run(async (a) => {
       // The newest state: an edit of the review the account has now.
-      const existing = await read.reviewOf(await state({ fresh: true }), a, p);
+      const now = await state({ fresh: true });
+      const existing = await read.reviewOf(now, a, p);
+      // A review this form wasn't made from (it was drawn before connecting)
+      // is never overwritten unseen.
+      if (existing?.id !== mine?.id) throw new Redraw("You've already reviewed this place. Here's your review: change it, then save.");
       return existing
-        ? write.review(a, existing.id, p, value, { edited: Date.now(), mediaCIDs, before: existing.media.length })
+        ? write.review(a, existing.id, p, value, { edited: Date.now(), mediaCIDs, before: await read.mediaSlots(now, a, existing.id) })
         : write.review(a, write.newId(), p, value, { mediaCIDs });
     }, "Your review", () => {
       toast(mine ? "Saved. It shows as edited." : "Your review is up. It shows as waiting until its block lands.");
@@ -988,8 +1026,9 @@ async function writeView(panel, route, stale) {
   });
   $("#delete")?.addEventListener("click", () => {
     run(async (a) => {
-      const existing = await read.reviewOf(await state({ fresh: true }), a, p);
-      return existing ? write.review(a, existing.id, p, undefined, { before: existing.media.length }) : [];
+      const now = await state({ fresh: true });
+      const existing = await read.reviewOf(now, a, p);
+      return existing ? write.review(a, existing.id, p, undefined, { before: await read.mediaSlots(now, a, existing.id) }) : [];
     }, "Deleting your review", () => {
       toast("Your review is deleted.");
       location.hash = placeHref(p);
@@ -1000,39 +1039,57 @@ async function writeView(panel, route, stale) {
 // ------------------------------------------------------------- Add place
 
 const newPlace = { name: "", category: "", address: "", url: "", phone: "", hours: "" };
-async function addView(panel, route, stale) {
+const editDraft = { key: "" };
+async function addView(panel, route, stale, arrived) {
   ensureMap();
   markers?.clearLayers();
+  // Editing: only a place's author can change its details.
+  const editing = route.view === "edit" ? route.place : null;
+  let before = null;
+  if (editing) {
+    const s = await state();
+    before = await read.place(s, editing.author, editing.id);
+    if (stale()) return;
+    if (!before || connected !== before.author) {
+      paint(panel, stale, `<div class="top"><a class="back" href="${before ? placeHref(before) : "#/"}">${backIcon}Back</a></div><div class="empty"><p>Only the person who added a place can edit its details.</p>${connected ? "" : connectButton()}</div>`);
+      return wireConnect(panel);
+    }
+    if (arrived || editDraft.key !== `${before.author}/${before.id}`) {
+      Object.assign(editDraft, { key: `${before.author}/${before.id}`, name: before.name, category: before.category ?? "Other", address: before.address ?? "", url: before.url ?? "", phone: before.phone ?? "", hours: before.hours ?? "" });
+      map.setView([before.lat, before.lon], 18);
+    }
+  }
+  const form = editing ? editDraft : newPlace;
   if (!$("#add-form", panel)) {
     panel.innerHTML = `
-      <div class="top"><a class="back" href="#/">${backIcon}Cancel</a></div>
+      <div class="top"><a class="back" href="${editing ? placeHref(editing) : "#/"}">${backIcon}Cancel</a></div>
       <div class="form" id="add-form">
-        <h1 class="title" style="font-size:22px">Add a place</h1>
+        <h1 class="title" style="font-size:22px">${editing ? "Edit place" : "Add a place"}</h1>
         <p class="small muted" style="margin:0">Move the map so the pin sits on the door.</p>
-        <label class="field">Name<input id="a-name" type="text" maxlength="200" autocomplete="off" value="${esc(newPlace.name)}"></label>
+        <label class="field">Name<input id="a-name" type="text" maxlength="200" autocomplete="off" value="${esc(form.name)}"></label>
         <div id="a-matches"></div>
-        <div class="field" style="gap:8px"><span id="cat-label">Category</span><div class="chips wrapping" role="radiogroup" aria-labelledby="cat-label">${CATEGORIES.map((c) => `<button type="button" class="chip" role="radio" aria-checked="${newPlace.category === c}" data-cat="${c}">${c}</button>`).join("")}</div></div>
+        <div class="field" style="gap:8px"><span id="cat-label">Category</span><div class="chips wrapping" role="radiogroup" aria-labelledby="cat-label">${CATEGORIES.map((c) => `<button type="button" class="chip" role="radio" aria-checked="${form.category === c}" data-cat="${c}">${c}</button>`).join("")}</div></div>
         <details><summary>More details (optional)</summary>
           <div class="form" style="padding:12px 0 0">
-            <label class="field">Address<input id="a-address" maxlength="300" value="${esc(newPlace.address)}"></label>
-            <label class="field">Website<input id="a-url" type="url" maxlength="300" placeholder="https://" value="${esc(newPlace.url)}"></label>
-            <label class="field">Phone<input id="a-phone" type="tel" maxlength="40" value="${esc(newPlace.phone)}"></label>
-            <label class="field">Hours<input id="a-hours" maxlength="200" placeholder="Mon–Fri 8–6" value="${esc(newPlace.hours)}"></label>
+            <label class="field">Address<input id="a-address" maxlength="300" value="${esc(form.address)}"></label>
+            <label class="field">Website<input id="a-url" type="url" maxlength="300" placeholder="https://" value="${esc(form.url)}"></label>
+            <label class="field">Phone<input id="a-phone" type="tel" maxlength="40" value="${esc(form.phone)}"></label>
+            <label class="field">Hours<input id="a-hours" maxlength="200" placeholder="Mon–Fri 8–6" value="${esc(form.hours)}"></label>
           </div>
         </details>
-        <p class="small muted" style="margin:0">Only you can edit this place's details. Anyone can review it.</p>
+        <p class="small muted" style="margin:0">${editing ? "Moving the pin moves the place. Its reviews stay with it." : "Only you can edit this place's details. Anyone can review it."}</p>
         <p class="status" id="a-status" role="status"></p>
-        <button type="button" class="btn wide" id="a-add" disabled>Add place</button>
+        <button type="button" class="btn wide" id="a-add" disabled>${editing ? "Save changes" : "Add place"}</button>
       </div>`;
     for (const f of ["name", "address", "url", "phone", "hours"]) {
       $(`#a-${f}`, panel).addEventListener("input", (e) => {
-        newPlace[f] = e.target.value;
+        form[f] = e.target.value;
         if (f === "name") checkNear();
         ready();
       });
     }
     $$("[data-cat]", panel).forEach((b) => b.addEventListener("click", () => {
-      newPlace.category = b.dataset.cat;
+      form.category = b.dataset.cat;
       $$("[data-cat]", panel).forEach((x) => x.setAttribute("aria-checked", String(x === b)));
       ready();
     }));
@@ -1046,60 +1103,69 @@ async function addView(panel, route, stale) {
   }
   let near = [];
   const ready = () => {
-    const ok = newPlace.name.trim() && newPlace.category;
+    const ok = form.name.trim() && form.category;
     $("#a-add").disabled = !ok;
-    $("#a-add").textContent = near.some((q) => sameName(q.name, newPlace.name)) ? "No, add a new place" : "Add place";
+    if (!editing) $("#a-add").textContent = near.some((q) => sameName(q.name, form.name)) ? "No, add a new place" : "Add place";
   };
   const checkNear = () => {
     const box = $("#a-matches");
     if (!box) return;
-    const name = newPlace.name.trim();
-    const likely = near.filter((q) => !name || sameName(q.name, name));
+    const name = form.name.trim();
+    const likely = editing ? [] : near.filter((q) => !name || sameName(q.name, name));
     box.innerHTML = name && likely.length
       ? `<section class="matches" aria-label="Possible matches"><h2>Is it one of these?</h2>${likely.map((q) => `<a href="${placeHref(q)}"><span><b>${esc(q.name)}</b><br><span class="small muted">${metres(q.dist)} · ${esc(q.category ?? "Place")}</span></span><span aria-hidden="true">›</span></a>`).join("")}</section>`
       : "";
     ready();
   };
   // Places within 50 m of the pin, as the map moves.
+  let looks = 0;
   const look = async () => {
+    const mine = ++looks;
     const c = map.getCenter();
-    const point = { lat: c.lat, lon: c.lng };
+    const point = { lat: c.lat, lon: wrapLon(c.lng) };
     const s = await state();
     const found = await read.placesIn(s, geo.around(point, 50));
-    if (stale()) return;
+    if (stale() || mine !== looks) return;
     near = found.map((q) => ({ ...q, dist: geo.distance(q, point) })).filter((q) => q.dist <= 50).sort((a, b) => a.dist - b.dist);
-    showPins(near);
+    showPins(editing ? near.filter((q) => !(q.author === editing.author && q.id === editing.id)) : near);
     checkNear();
   };
   onMapMoved = () => look().catch(() => {});
   async function add() {
     const c = map.getCenter();
     const value = {
-      name: newPlace.name.trim(),
+      name: form.name.trim(),
       lat: Math.round(c.lat * 1e6) / 1e6,
       lon: Math.round(c.lng * 1e6) / 1e6,
-      category: newPlace.category,
-      address: newPlace.address.trim(),
-      url: safeLink(newPlace.url.trim()) ? newPlace.url.trim() : "",
-      phone: newPlace.phone.trim(),
-      hours: newPlace.hours.trim(),
+      category: form.category,
+      address: form.address.trim(),
+      url: safeLink(form.url.trim()) ? form.url.trim() : "",
+      phone: form.phone.trim(),
+      hours: form.hours.trim(),
     };
-    if (newPlace.url.trim() && !value.url) {
+    if (form.url.trim() && !value.url) {
       $("#a-status").textContent = "The website must start with https:// or http://.";
       $("#a-status").classList.add("bad");
       return;
     }
-    const pid = write.newId();
+    const pid = editing ? editing.id : write.newId();
     const button = $("#a-add");
     button.disabled = true;
     $("#a-status").classList.remove("bad");
     try {
       let author;
-      await send((a) => {
+      await send(async (a) => {
         author = a;
-        return write.place(a, pid, value);
-      }, { status: (t) => ($("#a-status").textContent = t), what: "Your place" });
-      Object.assign(newPlace, { name: "", category: "", address: "", url: "", phone: "", hours: "" });
+        // An edit moves the listing from where the place stands now.
+        return write.place(a, pid, value, editing ? await read.place(await state({ fresh: true }), a, pid) : undefined);
+      }, { status: (t) => ($("#a-status").textContent = t), what: editing ? "Your changes" : "Your place" });
+      Object.assign(form, { name: "", category: "", address: "", url: "", phone: "", hours: "" });
+      if (editing) {
+        editDraft.key = "";
+        toast("Saved.");
+        location.hash = placeHref({ author, id: pid });
+        return;
+      }
       toast("Added. Now say what you thought of it.");
       location.hash = `${placeHref({ author, id: pid })}/review`;
     } catch (error) {
@@ -1210,11 +1276,12 @@ async function reviewer(panel, route, stale) {
   $("[data-back]", panel).addEventListener("click", () => (history.length > 1 ? history.back() : (location.hash = "#/following")));
   showPins(rows.map(([, p]) => p), { fit: true });
   const toggle = (attr, make, on, what) => $(`[${attr}]`, panel)?.addEventListener("click", async (e) => {
-    e.currentTarget.disabled = true;
+    const button = e.currentTarget;
+    button.disabled = true;
     try {
       await send((me) => make(me, a, !on), { what });
     } catch (error) {
-      e.currentTarget.disabled = false;
+      button.disabled = false;
       failed(error, what);
     }
   });
@@ -1229,11 +1296,12 @@ const connectButton = () => wallet()
   : `<button type="button" class="btn" data-get-wallet>Add Selfhold to write</button>`;
 function wireConnect(panel) {
   $("[data-connect]", panel)?.addEventListener("click", async (e) => {
-    e.currentTarget.disabled = true;
+    const button = e.currentTarget;
+    button.disabled = true;
     try {
       await connectWallet();
     } catch (error) {
-      e.currentTarget.disabled = false;
+      button.disabled = false;
       toast(walletMessage(error), { bad: true });
     }
   });

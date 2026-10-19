@@ -230,6 +230,26 @@ test("deleting a review removes it and its listing", async () => {
   assert.deepEqual([...c.kv.keys()].filter((k) => k.includes(BEN)), []);
 });
 
+test("an account counts once per place, however many listings it writes", async () => {
+  const c = await withPlace();
+  assert.ok(await c.write(BEN, write.review(BEN, "r1", P1, { stars: 5 })));
+  // Deeper keys under Ben's name are his to write, and must not count again.
+  assert.ok(await c.write(BEN, [[`index/review/${ANA}/p1/x1/${BEN}`, "r1"], [`index/review/${ANA}/p1/x2/${BEN}`, "r1"]]));
+  assert.deepEqual((await read.reviews(c.state, P1)).map((r) => r.author), [BEN]);
+  const R1 = { author: BEN, id: "r1" };
+  assert.ok(await c.write(CAT, [...write.helpful(CAT, R1), [`index/helpful/${BEN}/r1/x/${DEV}`, "1"]]) === false);
+  assert.ok(await c.write(CAT, [...write.helpful(CAT, R1), [`index/helpful/${BEN}/r1/x/${CAT}`, "1"]]));
+  assert.deepEqual([...(await read.helpful(c.state, R1))], [CAT]);
+  assert.ok(await c.write(CAT, [...write.reply(CAT, "x1", R1, { body: "hi" }), [`index/reply/${BEN}/r1/x1/y/${CAT}`, "1"]]));
+  assert.equal((await read.replies(c.state, R1)).length, 1);
+});
+
+test("mediaSlots counts to the highest slot, gaps included", async () => {
+  const c = await withPlace();
+  assert.ok(await c.write(BEN, [...write.review(BEN, "r1", P1, { stars: 4 }), [`user/${BEN}/post/r1/media/2`, "bafy3"]]));
+  assert.equal(await read.mediaSlots(c.state, BEN, "r1"), 3);
+});
+
 // --- replies, labels, helpful, follows
 
 test("replies sit under what they answer; labels are replies", async () => {

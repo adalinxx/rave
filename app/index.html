@@ -54,14 +54,14 @@ h1, h2, h3 { margin: 0; letter-spacing: -0.01em; }
 #map { position: relative; flex: none; height: 42vh; background: var(--soft); z-index: 0; }
 #panel { flex: 1; overflow-y: auto; overscroll-behavior: contain; background: var(--panel); padding-bottom: 24px; }
 body:not(.with-map) #map { display: none; }
-body.view-add #map { height: 300px; }
+body.view-add #map, body.view-edit #map { height: 300px; }
 #tabs { order: 3; flex: none; display: flex; justify-content: space-around; border-top: 1px solid var(--line); background: var(--panel); padding: 6px 0 max(8px, env(safe-area-inset-bottom)); }
 #tabs a { display: flex; flex-direction: column; align-items: center; gap: 2px; min-width: 72px; min-height: 44px; font-size: 12px; color: var(--muted); text-decoration: none; }
 #tabs a[aria-current="page"] { color: var(--ink); font-weight: 700; }
 #tabs svg { stroke: currentColor; }
 @media (min-width: 900px) {
   #app { flex-direction: row-reverse; }
-  body:not(.with-map) #map, #map, body.view-add #map { display: block; flex: 1; height: auto; }
+  body:not(.with-map) #map, #map, body.view-add #map, body.view-edit #map { display: block; flex: 1; height: auto; }
   #side { width: 440px; flex: none; display: flex; flex-direction: column; border-right: 1px solid var(--line); }
   #tabs { order: -1; border-top: 0; border-bottom: 1px solid var(--line); padding: 6px 0; }
 }
@@ -142,13 +142,15 @@ body.view-add #map { height: 300px; }
 .who-line .id { display: flex; flex-direction: column; min-width: 0; }
 .who-line .id a { font-weight: 700; color: var(--ink); text-decoration: none; }
 .who-line .id a:hover { text-decoration: underline; }
-.hist { display: flex; align-items: center; gap: 6px; font-size: 13px; color: var(--muted); }
+.hist { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; font-size: 13px; color: var(--muted); }
+.who-line .id, .who-line .id a { min-width: 0; overflow-wrap: anywhere; }
+#w-add-photo:focus-within { outline: 2px solid var(--accent); outline-offset: 2px; }
 .badge { display: inline-block; font-size: 12px; font-weight: 700; padding: 1px 8px; border-radius: 10px; background: var(--soft); color: var(--muted); margin-left: 6px; vertical-align: 1px; }
 .badge.label { background: var(--warn-bg); color: var(--ink); border: 1px solid var(--warn-line); }
 .spark { display: inline-flex; gap: 2px; align-items: flex-end; height: 14px; }
 .spark i { display: block; width: 4px; background: var(--star); border-radius: 1px; }
 .stars { display: inline-flex; gap: 1px; vertical-align: -3px; }
-.rv-meta { display: flex; align-items: center; gap: 8px; margin-top: 8px; font-size: 13px; color: var(--muted); }
+.rv-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 8px; font-size: 13px; color: var(--muted); }
 .rv-body { margin: 6px 0 0; white-space: pre-wrap; overflow-wrap: anywhere; }
 .rv-acts { display: flex; gap: 16px; margin-top: 6px; font-size: 14px; }
 .rv-acts button { background: none; border: 0; padding: 0; min-height: 32px; color: var(--muted); font-weight: 600; cursor: pointer; }
@@ -218,7 +220,7 @@ dialog .buttons { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
 .toast.bad { background: var(--bad); color: #fff; }
 .toast button { background: none; border: 0; color: inherit; font-weight: 700; cursor: pointer; }
 .skeleton { padding: 24px 16px; color: var(--muted); }
-body:not(.view-add) .crosshair, body:not(.view-explore) .fab { display: none; }
+body:not(.view-add):not(.view-edit) .crosshair, body:not(.view-explore) .fab { display: none; }
 </style>
 </head>
 <body>

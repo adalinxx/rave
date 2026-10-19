@@ -286,6 +286,53 @@ test("adding a place that's already listed nearby offers the existing ones first
   await expect(page.locator("h1.title")).toHaveText("Marigold Noodle Bar");
 });
 
+test("only a place's author can edit its details; moving the pin moves the place", async ({ watch }) => {
+  const me = newAccount();
+  const at = { lat: 40.7388, lon: -73.9930 };
+  await writeAs(stack.info.node, stack.info.chain, me, write.place(me.address, "kiosk", { name: "News Kiosk", category: "Shop", ...at }));
+  const { page } = await person(watch, me);
+  await connect(page);
+  await page.goto(`${stack.info.app}#/place/${me.address}/kiosk`);
+  await page.getByRole("link", { name: "Edit details" }).click();
+  await expect(page.locator("h1.title")).toHaveText("Edit place");
+  await expect(page.locator("#a-name")).toHaveValue("News Kiosk");
+  await page.locator("#a-name").fill("Corner News");
+  await page.getByRole("radio", { name: "Service" }).click();
+  // About 60 m north.
+  await page.evaluate(() => window.dispatchEvent(new CustomEvent("rave-test-pan", { detail: [0.00055, 0] })));
+  await page.getByRole("button", { name: "Save changes" }).click();
+  await expect(page.locator("h1.title")).toHaveText("Corner News");
+  await landed(page);
+  await expect(page.locator(".place-head")).toContainText("Service");
+  // Found where it is now, not where it was.
+  const other = await visitor(watch, { lat: at.lat + 0.00055, lon: at.lon, zoom: 19 });
+  await other.goto(stack.info.app);
+  await expect(other.locator("a.row", { hasText: "Corner News" })).toBeVisible();
+  // Someone else sees no Edit details, and the edit page refuses them.
+  const stranger = await visitor(watch);
+  await stranger.goto(`${stack.info.app}#/place/${me.address}/kiosk`);
+  await expect(stranger.locator("h1.title")).toHaveText("Corner News");
+  await expect(stranger.getByRole("link", { name: "Edit details" })).toHaveCount(0);
+  await stranger.goto(`${stack.info.app}#/place/${me.address}/kiosk/edit`);
+  await expect(stranger.locator("#panel")).toContainText("Only the person who added a place can edit its details.");
+});
+
+test("a label is text, never markup", async ({ watch }) => {
+  const labeller = newAccount();
+  const reader = newAccount();
+  const ninth = { author: people["Tess Ward"].address, id: "ninth" };
+  const target = { author: people["Ari Chen"].address, id: "r-ninth" };
+  await writeAs(stack.info.node, stack.info.chain, labeller, write.reply(labeller.address, "evil", target, { body: "", labels: ['<img src=x onerror="window.pwned=1">'] }));
+  await writeAs(stack.info.node, stack.info.chain, reader, write.followLabels(reader.address, labeller.address));
+  const { page } = await person(watch, reader);
+  await connect(page);
+  await page.goto(stack.info.app + placeHash(ninth));
+  const folded = page.locator("article.review .folded");
+  await expect(folded).toContainText('Labelled <img src=x onerror="window.pwned=1">');
+  assert.equal(await page.locator("#panel img[src=x]").count(), 0);
+  assert.equal(await page.evaluate(() => window.pwned), undefined);
+});
+
 test("a reviewer edits their review (it keeps its date and says Edited), then deletes it", async ({ watch }) => {
   const me = newAccount();
   const { page } = await person(watch, me);
