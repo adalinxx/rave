@@ -67,8 +67,9 @@ names `dana` on Moniker and `dana` points at it; Rave asks Moniker through
 the [Moniker SDK](https://github.com/adalinxx/moniker-sdk) (a submodule at
 `app/vendor/moniker-sdk`: clone with `--recurse-submodules`) and shows the
 card's name with the verified handle beside it ("Dana Okafor @dana"),
-checking it again every few seconds. A card name never shows with a leading
-`@`, so only a verified handle looks like one. "Use a handle" offers the
+checking it again every few seconds. A card name is shown without any `@`,
+look-alike or invisible and reversing marks (the SDK's `displayName`), so
+only a verified handle looks like one. "Use a handle" offers the
 account's Moniker names, or claims a free one, pointed at the account and
 shown: one approval either way.
 
@@ -169,9 +170,11 @@ Moniker's policy module and a spec with fast blocks). Each test is something
 a person does, checked by what the page then shows: exploring and filtering,
 reading a place, a new account making its card as it adds a place and
 reviewing it, nearby duplicates offered first, making a card and showing a
-handle (the byline shows both; a handle pointed away stops showing), a card
-name that can't pass for a handle, claiming a free handle and declining to
-stop showing it,
+handle (the byline shows both; a handle pointed away stops showing), card
+names that can't pass for a handle, claiming a free handle and declining to
+stop showing it, a broken card asking for a new one, a write refused when
+Selfhold's account isn't the one the page shows, Settings keeping only the
+reader's own choices,
 editing and deleting, declining in the wallet, helpful and replies, photos
 kept by one's own node, editing a place (its author only), labels shown as
 text never markup, following, labels and their modes, duplicates,

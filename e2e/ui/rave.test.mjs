@@ -510,14 +510,26 @@ test("someone makes their card, shows a handle they own, and their review's byli
   }).toPass({ timeout: 60_000 });
 });
 
-test("a card name can't pass for a handle: a leading @ is dropped", async ({ watch }) => {
-  const faker = await newPerson("@dana");
-  await writeAs(stack.info.node, stack.info.chain, faker, write.review(faker.address, "r-fake", { author: people["Mo Haddad"].address, id: "harborhw" }, { stars: 5, body: "Totally Dana." }));
+test("a card name can't pass for a handle: no @ anywhere, no hidden or reversing marks", async ({ watch }) => {
+  const harbor = { author: people["Mo Haddad"].address, id: "harborhw" };
+  // [card name, what the byline says, the review's words]
+  const fakes = [
+    ["@dana", "dana", "Totally Dana."],
+    ["Dana Okafor @dana", "Dana Okafor dana", "Dana here, honest."],
+    ["\u202Eanad\u200B @dana", "anad dana", "Reversed Dana."],
+  ];
+  await Promise.all(fakes.map(async ([name, , body], i) => {
+    const faker = await newPerson(name);
+    await writeAs(stack.info.node, stack.info.chain, faker, write.review(faker.address, `r-fake${i}`, harbor, { stars: 5, body }));
+  }));
   const page = await visitor(watch);
-  await page.goto(stack.info.app + `#/place/${people["Mo Haddad"].address}/harborhw`);
-  const byline = page.locator("article.review", { hasText: "Totally Dana." }).locator(".who-line .id a");
-  await expect(byline).toHaveText("dana");
-  await expect(byline.locator(".handle")).toHaveCount(0);
+  await page.goto(stack.info.app + `#/place/${harbor.author}/harborhw`);
+  for (const [, shown, body] of fakes) {
+    const byline = page.locator("article.review", { hasText: body }).locator(".who-line .id a");
+    await expect(byline).toHaveText(shown);
+    await expect(byline.locator(".handle")).toHaveCount(0);
+    assert.ok(!/[@\u202E\u200B]/.test(await byline.innerText()), shown);
+  }
 });
 
 test("claiming a free handle shows it in one approval; declining Stop showing it changes nothing", async ({ watch }) => {
@@ -540,6 +552,59 @@ test("claiming a free handle shows it in one approval; declining Stop showing it
   await expect(page.getByRole("button", { name: "Use a handle" })).toBeVisible();
   await expect(page.locator(".profile h1")).toHaveText("Pat Work");
   assert.deepEqual(context.answers, ["Connect", "Sign write", "declined Sign write", "Sign write"]);
+});
+
+test("a link's chains hold for its visit: Settings shows and keeps only the reader's own", async ({ watch }) => {
+  const page = await visitor(watch);
+  await page.goto(`${stack.info.app}?moniker=Nexus/elsewhere#/settings`);
+  await expect(page.locator("[data-link-note]")).toContainText("Moniker chain from the link you opened (Nexus/elsewhere)");
+  await expect(page.getByLabel("Names (Moniker chain)")).toHaveValue(stack.info.moniker);
+  await page.getByRole("button", { name: "Save" }).click();
+  await page.waitForLoadState();
+  assert.equal(await page.evaluate(() => JSON.parse(localStorage.getItem("rave:monikerChain"))), stack.info.moniker);
+});
+
+test("a broken card counts as none: the next write asks for a card", async ({ watch }) => {
+  const me = newAccount();
+  await writeAs(stack.info.node, stack.info.chain, me, [[`user/${me.address}/card`, "{not json"]]);
+  const { page } = await person(watch, me);
+  await connect(page);
+  await expect(page.getByRole("button", { name: "Make your card" })).toBeVisible();
+  await page.goto(stack.info.app + `#/place/${people["Lin Wei"].address}/parkcuts/review`);
+  await page.getByRole("radio", { name: "3 of 5 stars" }).click();
+  await page.getByRole("button", { name: "Post review" }).click();
+  await fillCard(page, "Fixed Card");
+  await expect(page.locator("article.review", { hasText: "Fixed Card" })).toBeVisible();
+  await landed(page);
+});
+
+test("a write is refused when Selfhold's account isn't the one the page shows", async ({ watch }) => {
+  const me = await newPerson("Shown Person");
+  const { context, page } = await person(watch, me);
+  await connect(page);
+  await page.getByRole("button", { name: "Use a handle" }).click();
+  const dialog = page.getByRole("dialog", { name: "Use a handle" });
+  await dialog.getByLabel("Or claim a free one").fill("not_mine");
+  // Behind the page's back, Selfhold gets a second account and this site is connected to it in another tab.
+  const other = newAccount();
+  const origin = context.serviceWorkers()[0].url().split("/").slice(0, 3).join("/");
+  const popup = await context.newPage();
+  await popup.goto(`${origin}/popup/index.html`);
+  const imported = await popup.evaluate((privHex) => chrome.runtime.sendMessage({ type: "importKey", privHex }), other.keyHex);
+  assert.ok(imported?.ok, imported?.error);
+  await popup.close();
+  const tab = await context.newPage();
+  await tab.goto(`${stack.info.app}#/settings`);
+  assert.equal(await tab.evaluate(async () => {
+    await window.lattice.disconnect();
+    return window.lattice.connect();
+  }), other.address);
+  await tab.close();
+  await page.bringToFront();
+  await dialog.getByRole("button", { name: "Use handle" }).click();
+  await expect(dialog.locator("#hd-status")).toContainText("Selfhold is connected to another account than this page showed.");
+  assert.deepEqual(context.answers, ["Connect", "Connect"]);
+  assert.equal(await (await stateOf(stack.info.node, stack.info.moniker)).get("name/not_mine"), undefined);
 });
 
 // ------------------------------------------------------- choosing whom to trust

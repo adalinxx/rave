@@ -108,6 +108,20 @@ async function connectWallet() {
 /** The reader's address, connecting first if needed. */
 const me = async () => connected ?? (await connectWallet());
 
+/**
+ * The wallet's account now, which must be the one the page is drawn for
+ * (`connected`): a write never goes from another. On a mismatch the page is
+ * drawn again for the wallet's account, and this throws.
+ */
+async function sameAccount() {
+  const actual = await wallet()?.address?.().catch(() => null);
+  if (actual && actual !== connected) {
+    setConnected(actual);
+    throw new Said("Selfhold is connected to another account than this page showed. It's drawn again for that account: look, then try again.");
+  }
+  return connected;
+}
+
 function setConnected(address) {
   if (address === connected) return;
   connected = address;
@@ -230,6 +244,7 @@ async function send(build, { status = () => {}, what = "This", as, card } = {}) 
     if (error instanceof NoWallet) throw error;
     throw new Said(walletMessage(error));
   }
+  address = await sameAccount();
   if (as && as !== address) throw new Said("Selfhold is connected to another account than this was drawn for. Look again, then try.");
   if (!card && !(await hasCard(address))) {
     card = await askCard({ why: `${what} goes out under your Rave card. Make it first: it's what people see on what you write.` });
@@ -276,12 +291,13 @@ async function send(build, { status = () => {}, what = "This", as, card } = {}) 
 const cardKey = (account) => `card-sent:${account}`;
 /** Whether `account` has a card: on the chain, waiting in this page, or sent from this browser in the last 15 minutes. */
 async function hasCard(account) {
-  const key = `user/${account}/card`;
-  if ((await (await chainState()).get(key)) !== undefined) {
+  // A card counts only if it reads as one: a broken one asks for a new card.
+  if (await read.card(await chainState(), account)) {
     store.set(cardKey(account), undefined);
     return true;
   }
-  return pending.has(key) || Date.now() - store.get(cardKey(account), 0) < 15 * 60_000;
+  if (pending.has(`user/${account}/card`)) return Boolean(await read.card(await state(), account));
+  return Date.now() - store.get(cardKey(account), 0) < 15 * 60_000;
 }
 
 async function landing(actions, batch) {
@@ -1432,8 +1448,12 @@ async function you(panel, route, stale) {
     const button = e.currentTarget; // before any await: it is null after
     button.disabled = true;
     try {
+      await sameAccount();
       const writer = await within(15_000, monikerWriter());
-      await viaWallet(() => writer.stopShowing({ wallet: wallet() }));
+      await viaWallet(async () => {
+        await sameAccount();
+        return writer.stopShowing({ wallet: wallet() });
+      });
       toast("Your handle stops showing once its block lands.");
       waitForHandle(who.address, "");
     } catch (error) {
@@ -1518,10 +1538,16 @@ async function openHandle(account) {
       if (!entry) {
         // A free name: claimed, pointed at you and shown, in one transaction.
         status.textContent = "Approve it in Selfhold: Moniker gives you the name and shows it.";
-        await viaWallet(() => writer.claim(h, { show: true }, { wallet: wallet() }));
+        await viaWallet(async () => {
+          await sameAccount();
+          return writer.claim(h, { show: true }, { wallet: wallet() });
+        });
       } else {
         status.textContent = "Approve it in Selfhold: Moniker shows the name for you.";
-        await viaWallet(() => writer.showName(h, { wallet: wallet() }));
+        await viaWallet(async () => {
+          await sameAccount();
+          return writer.showName(h, { wallet: wallet() });
+        });
       }
       lock(false);
       dialog.close();
@@ -1597,13 +1623,21 @@ function askCard({ card, why = "" } = {}) {
 // --------------------------------------------------------------- Settings
 
 async function settingsView(panel, route, stale) {
+  // The kept choices, not a link's values for this visit: saving keeps only what is shown here.
+  const kept = {
+    node: store.get("node", DEFAULTS.node),
+    chain: store.get("chain", DEFAULTS.chain),
+    moniker: store.get("monikerChain", null) ?? MONIKER.chain.join("/"),
+  };
+  const fromLink = ["node", "chain", "moniker"].filter((p) => linked(p));
   paint(panel, stale, `
     <div class="top"><a class="back" href="#/you">${backIcon}You</a></div>
     <div class="form"><h1 class="title" style="font-size:22px">Settings</h1>
       <p class="small muted" style="margin:0">Rave reads from any node that serves its chain, and checks everything it reads against the chain's own hashes, so a node can refuse to answer but can't change what you see.</p>
-      <label class="field">Node<input id="s-node" value="${esc(settings.node)}" inputmode="url"></label>
-      <label class="field">Rave chain<input id="s-chain" value="${esc(settings.chain)}"></label>
-      <label class="field">Names (Moniker chain)<input id="s-moniker" value="${esc(settings.moniker)}"></label>
+      ${fromLink.length ? `<div class="notice" data-link-note>This visit reads the ${fromLink.map((p) => ({ node: "node", chain: "Rave chain", moniker: "Moniker chain" })[p]).join(" and ")} from the link you opened (${fromLink.map((p) => esc(settings[p])).join(", ")}). Below are your own choices; only they are kept.</div>` : ""}
+      <label class="field">Node<input id="s-node" value="${esc(kept.node)}" inputmode="url"></label>
+      <label class="field">Rave chain<input id="s-chain" value="${esc(kept.chain)}"></label>
+      <label class="field">Names (Moniker chain)<input id="s-moniker" value="${esc(kept.moniker)}"></label>
       <h2 style="font-size:16px;margin-top:8px">Your node, for photos</h2>
       <p class="small muted" style="margin:0">Photos aren't stored on the chain: your own Lattice node keeps them and serves them to readers. Give its operator address and the cookie it writes at each start (<code>chains/Nexus/.cookie</code>), and let it accept this site (<code>rpcAllowedOrigins</code>: <code>${esc(location.origin)}</code>).</p>
       <label class="field">Operator address<input id="s-own" value="${esc(settings.ownNode)}" placeholder="http://127.0.0.1:8080" inputmode="url"></label>
