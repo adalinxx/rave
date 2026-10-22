@@ -520,7 +520,7 @@ test("a card name can't pass for a handle: a leading @ is dropped", async ({ wat
   await expect(byline.locator(".handle")).toHaveCount(0);
 });
 
-test("claiming a free handle shows it; declining Stop showing it changes nothing", async ({ watch }) => {
+test("claiming a free handle shows it in one approval; declining Stop showing it changes nothing", async ({ watch }) => {
   const { context, page } = await person(watch, await newPerson("Pat Work"));
   await connect(page);
   await page.getByRole("button", { name: "Use a handle" }).click();
@@ -539,7 +539,7 @@ test("claiming a free handle shows it; declining Stop showing it changes nothing
   await page.getByRole("button", { name: "Stop showing it" }).click();
   await expect(page.getByRole("button", { name: "Use a handle" })).toBeVisible();
   await expect(page.locator(".profile h1")).toHaveText("Pat Work");
-  assert.deepEqual(context.answers, ["Connect", "Sign write", "Sign write", "declined Sign write", "Sign write"]);
+  assert.deepEqual(context.answers, ["Connect", "Sign write", "declined Sign write", "Sign write"]);
 });
 
 // ------------------------------------------------------- choosing whom to trust

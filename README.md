@@ -69,8 +69,8 @@ the [Moniker SDK](https://github.com/adalinxx/moniker-sdk) (a submodule at
 card's name with the verified handle beside it ("Dana Okafor @dana"),
 checking it again every few seconds. A card name never shows with a leading
 `@`, so only a verified handle looks like one. "Use a handle" offers the
-account's Moniker names (one approval), or claims a free one, pointed at
-the account, and shows it (two).
+account's Moniker names, or claims a free one, pointed at the account and
+shown: one approval either way.
 
 ## Records
 

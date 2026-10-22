@@ -63,13 +63,15 @@ export async function submit(node, chain, who, actions) {
 }
 
 /**
- * `who` shows `handle` on Moniker, claiming it pointed at them first if it's
- * free; landed. False when someone else holds it and it doesn't point at them.
+ * `who` shows `handle` on Moniker (claiming it, pointed at them and shown in
+ * one transaction, if it's free); landed. False when someone else holds it
+ * and it doesn't point at them.
  */
 export async function showHandle(node, monikerChain, who, handle) {
   const entry = await resolve(await stateOf(node, monikerChain), handle);
   if (entry && entry.owner !== who.address && entry.pointer !== who.address) return false;
-  if (!entry) await submit(node, monikerChain, who, (await claim(await stateOf(node, monikerChain), who.address, handle, { point: true })).actions);
-  await submit(node, monikerChain, who, (await showName(await stateOf(node, monikerChain), who.address, handle)).actions);
+  const state = await stateOf(node, monikerChain);
+  const w = entry ? await showName(state, who.address, handle) : await claim(state, who.address, handle, { show: true });
+  await submit(node, monikerChain, who, w.actions);
   return true;
 }

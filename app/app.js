@@ -1516,17 +1516,9 @@ async function openHandle(account) {
       }
       lock(true, { asking: true });
       if (!entry) {
-        // A free name: claimed, pointed at you, then shown.
-        status.textContent = "Approve two in Selfhold: Moniker gives you the name, then shows it.";
-        await viaWallet(async () => {
-          await writer.claim(h, { point: true }, { wallet: wallet() });
-          // Shown once the claim is in Moniker's state.
-          for (let tries = 0; !(await within(10_000, writer.name(h)).catch(() => undefined)); tries++) {
-            if (tries >= 60) throw new Error(`@${h} isn't in a block yet. Use it again in a moment.`);
-            await new Promise((resolve) => setTimeout(resolve, 2000));
-          }
-          await writer.showName(h, { wallet: wallet() });
-        });
+        // A free name: claimed, pointed at you and shown, in one transaction.
+        status.textContent = "Approve it in Selfhold: Moniker gives you the name and shows it.";
+        await viaWallet(() => writer.claim(h, { show: true }, { wallet: wallet() }));
       } else {
         status.textContent = "Approve it in Selfhold: Moniker shows the name for you.";
         await viaWallet(() => writer.showName(h, { wallet: wallet() }));
