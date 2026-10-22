@@ -25,11 +25,18 @@ function stamped(key, newValue, oldValue, time) {
 }
 
 /**
+ * When a new post says it was written by default: a few seconds ago. The
+ * chain refuses a post stamped after its block's time, and a writer's clock
+ * may run ahead of the miner's; the policy's window reaches far further back.
+ */
+export const SKEW = 5000;
+
+/**
  * The actions for a list of `[key, value]` writes against `state` (a view,
  * see state.mjs), as of `time` (when a new record says it was written). A
  * value of undefined deletes the key. A key written twice takes its last value.
  */
-export async function changes(state, writes, time = Date.now()) {
+export async function changes(state, writes, time = Date.now() - SKEW) {
   const last = new Map(writes);
   const actions = await Promise.all(
     [...last].map(async ([key, value]) => {
@@ -129,6 +136,12 @@ export const reply = (a, xid, on, value) => [
 
 /** `a` marks a review helpful, or takes it back with `on` false. */
 export const helpful = (a, review, on = true) => [[`index/helpful/${review.author}/${review.id}/${a}`, flag(on)]];
+
+/**
+ * `a`'s card, what Rave shows for them: `{ name, bio?, photo? }` (`photo` a
+ * photo's CID, kept like a review's). Undefined deletes it.
+ */
+export const card = (a, value) => [[`user/${a}/card`, json(value && fields(value, ["name", "bio", "photo"]))]];
 
 /** `a` follows `b`'s reviews, or stops. */
 export const follow = (a, b, on = true) => [[`user/${a}/follow/${b}`, flag(on)]];

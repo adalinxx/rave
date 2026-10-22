@@ -191,6 +191,26 @@ export async function by(state, a) {
   return out;
 }
 
+/**
+ * `a`'s card: `{ name, bio?, photo? }`, or undefined when they have none or
+ * it doesn't parse. The name is what Rave shows for them, beside any @handle
+ * Moniker verifies.
+ */
+export async function card(state, a) {
+  const value = parse(await state.get(`user/${a}/card`));
+  if (!isObject(value)) return undefined;
+  const name = text(value.name, 80)?.trim();
+  if (!name) return undefined;
+  return {
+    name,
+    ...(text(value.bio, 300) && { bio: value.bio }),
+    ...(text(value.photo, 200) && { photo: value.photo }),
+  };
+}
+
+/** Cards for many accounts, in order. */
+export const cards = (state, accounts) => Promise.all(accounts.map((a) => card(state, a)));
+
 /** The accounts `a` follows. */
 export async function follows(state, a) {
   const prefix = `user/${a}/follow/`;
