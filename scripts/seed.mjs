@@ -1,14 +1,27 @@
 // Demo places and reviews around Madison Square Park, written by a handful of
-// accounts the way any client writes: each signs its own records. For a
-// trial chain or a local look. Keys are made fresh, or read from (and saved
-// to) a directory.
+// accounts the way any client writes: each signs its own records, starting
+// with its Rave card, and shows its handle on Moniker (claimed if free). For
+// a trial chain or a local look. Keys are made fresh, or read from (and
+// saved to) a directory.
 //
 //   node scripts/seed.mjs <node URL> <Rave chain> <Moniker chain> [keys dir]
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { newAccount, setName, writeAs } from "../e2e/ui/helpers.mjs";
+import { newAccount, showHandle, writeAs } from "../e2e/ui/helpers.mjs";
 import * as write from "../client/write.mjs";
 
 export const PEOPLE = ["Dana Okafor", "Sam Reyes", "Ari Chen", "Mo Haddad", "Tess Ward", "Lin Wei", "Clean Plate", "Rina Patel"];
+/** Each person's Moniker handle, and the few words on their card. */
+export const HANDLES = ["dana", "sam", "ari", "mo", "tess", "lin", "cleanplate", "rina"];
+export const BIOS = [
+  "Eats around Flatiron most nights.",
+  "Coffee first.",
+  "Noodles, bread, repeat.",
+  "Fixes things; reviews the places that sell the parts.",
+  "Bakeries and the odd bar.",
+  "Runs Marigold Noodle Bar.",
+  "We flag paid and fake reviews, and say why.",
+  "New to the neighborhood.",
+];
 
 export const PLACES = [
   { id: "marigold", by: 0, name: "Marigold Noodle Bar", lat: 40.74168, lon: -73.98945, category: "Food", address: "21 E 24th St", hours: "Daily 11:30–22:00" },
@@ -58,12 +71,15 @@ export async function seed(node, chain, monikerChain, keysDir) {
     }
     return { name, ...account };
   });
-  await Promise.all(people.map((p) => setName(node, monikerChain, p, p.name)));
-  // Places: each by its own author.
-  const byPerson = new Map();
-  for (const p of PLACES) byPerson.set(p.by, [...(byPerson.get(p.by) ?? []), p]);
-  await Promise.all([...byPerson].map(([i, list]) =>
-    writeAs(node, chain, people[i], list.flatMap((p) => write.place(people[i].address, p.id, p)))));
+  // Cards and places: each person's in one transaction; handles on Moniker meanwhile.
+  await Promise.all(people.map(async (person, i) => {
+    const places = PLACES.filter((p) => p.by === i).flatMap((p) => write.place(person.address, p.id, p));
+    const [, shown] = await Promise.all([
+      writeAs(node, chain, person, [...write.card(person.address, { name: person.name, bio: BIOS[i] }), ...places]),
+      showHandle(node, monikerChain, person, HANDLES[i]),
+    ]);
+    person.handle = shown ? HANDLES[i] : undefined;
+  }));
   const ref = (id) => ({ author: people[PLACES.find((p) => p.id === id).by].address, id });
   // Reviews: one transaction per person. A record's time is when it is sent:
   // the chain holds it to its block, so demo data can't be backdated.

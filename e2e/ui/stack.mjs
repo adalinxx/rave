@@ -1,7 +1,11 @@
 // A private Rave stack for the UI tests: one Lattice host mining Nexus, a
-// Rave chain and a Moniker chain (where names come from) from a fast test
-// spec, with public reads and submits, and a static server for the
-// repository so the real app/ page runs against it.
+// Rave chain (chain/) and a Moniker chain (where handles come from), each
+// from a fast test spec, with public reads and submits, and a static server
+// for the repository so the real app/ page runs against it.
+//
+// moniker/ holds Moniker's policy module, built in the Moniker repository
+// (policy/target/…/moniker_policy.wasm), and its spec with 2-second blocks,
+// the moduleCID as Lattice's host-check prints it for that module.
 //
 //   LATTICE=<lattice-node>/.build/debug/lattice
 import { execFileSync } from "node:child_process";
@@ -12,8 +16,6 @@ import { extname, join, normalize } from "node:path";
 import { fileURLToPath } from "node:url";
 
 export const RAVE = ["Nexus", "rave"];
-// Names: a card at user/<a>/profile. Rave's owner-only policy stands in for
-// Moniker's own here; the page only reads the card.
 export const MONIKER = ["Nexus", "moniker"];
 const here = (path) => fileURLToPath(new URL(path, import.meta.url));
 const repo = here("../../");
@@ -80,9 +82,8 @@ export async function start() {
   // Rave's spec with 2-second blocks: the policy's time window follows it.
   const spec = { ...JSON.parse(readFileSync(here("../../chain/spec.json"), "utf8")), targetBlockTime: 2000 };
   writeFileSync(`${root}/rave-test-spec.json`, JSON.stringify(spec));
-  for (const chain of [RAVE, MONIKER]) {
-    lattice("child", "create", chain.join("/"), "--spec", `${root}/rave-test-spec.json`, "--policy-module", here("../../chain/policy.wasm"));
-  }
+  lattice("child", "create", RAVE.join("/"), "--spec", `${root}/rave-test-spec.json`, "--policy-module", here("../../chain/policy.wasm"));
+  lattice("child", "create", MONIKER.join("/"), "--spec", here("./moniker/spec.json"), "--policy-module", here("./moniker/policy.wasm"));
   configure((t) => {
     t.mine.recipients = { [RAVE.join("/")]: miner.address, [MONIKER.join("/")]: miner.address };
   });
