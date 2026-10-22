@@ -21,7 +21,7 @@ reader's Selfhold wallet, which holds their key.
   "Everyone", how many reviews came in the last three months, star bars
   (past five ratings) that filter to one level, and the reviews. A line says
   how they are ordered and changes it. Each card shows the reviewer's name
-  (from their Moniker card), how long and how many places they have
+  (their Rave card's, with the @handle Moniker verifies), how long and how many places they have
   reviewed, and the spread of their stars. Replies, owners' included, sit
   under the review they answer.
 - **Write**: stars alone are a complete review; words and up to ten photos
@@ -33,11 +33,13 @@ reader's Selfhold wallet, which holds their key.
   like you": people whose stars were within one of yours on places you both
   reviewed, worked out in the page.
 - **A reviewer**: their history, Follow, and Use their labels.
-- **You**: for each labeler you use, what each label does (Show, Warn or
+- **You**: your Rave card (make or edit it), your @handle ("Use a handle",
+  "Stop showing it"), and for each labeler you use, what each label does (Show, Warn or
   Hide). Labels hidden from a list are counted at its foot, with Show.
 
 Reading needs nothing. Writing needs [Selfhold](https://chromewebstore.google.com/detail/amcobhbipbblfjonmoiicihhfglkhpce),
-which asks before every write. Writes are free on the trial chain.
+which asks before every write, and a Rave card, which the page asks for the
+first time you write and sends with that write. Writes are free on the trial chain.
 
 The map is drawn by [Leaflet](https://leafletjs.com) (vendored in
 `app/vendor/leaflet`) over OpenStreetMap's tiles; the tile host sees which
@@ -49,8 +51,26 @@ python3 -m http.server 8765   # from the repository root, then open http://127.0
 ```
 
 The page reads the trial chain by default. A link may carry `?node=`,
-`?chain=` and `?moniker=`, and Settings changes them; both are kept in the
-browser.
+`?chain=` and `?moniker=` for that visit; only Settings changes what the
+browser keeps, so a link can't change what later visits read.
+
+## Cards and handles
+
+An account is a key; Rave shows it only as a last resort, as the end of its
+address. What people see is the account's **Rave card**, `user/<a>/card` on
+Rave's own chain: a name, a few words, a photo (kept by the writer's own
+node, like a review's). Signing up is writing the card.
+
+A **handle** (`@dana`) is a name on [Moniker](https://github.com/adalinxx/moniker),
+the names chain Lattice apps share. An account shows `@dana` only while it
+names `dana` on Moniker and `dana` points at it; Rave asks Moniker through
+the [Moniker SDK](https://github.com/adalinxx/moniker-sdk) (a submodule at
+`app/vendor/moniker-sdk`: clone with `--recurse-submodules`) and shows the
+card's name with the verified handle beside it ("Dana Okafor @dana"),
+checking it again every few seconds. A card name never shows with a leading
+`@`, so only a verified handle looks like one. "Use a handle" offers the
+account's Moniker names (one approval), or claims a free one, pointed at
+the account, and shows it (two).
 
 ## Records
 
@@ -79,6 +99,7 @@ else is a convention clients share; values are JSON.
 | `index/helpful/<author>/<id>/<a>` | `"1"`: `<a>` found a review helpful |
 | `user/<a>/follow/<b>` | `"1"`: `<a>` follows `<b>`'s reviews |
 | `user/<a>/follow-labels/<b>` | `"1"`: `<a>` uses `<b>`'s labels |
+| `user/<a>/card` | `<a>`'s card `{ name, bio?, photo? }` (`photo` a CID) |
 
 A listing is a claim by whoever wrote it, so a reader checks it against the
 record it lists: a place counts in a cell only when its own point is there,
@@ -100,11 +121,7 @@ the file through its operator routes, with the cookie the node writes; set
 it in Settings). Readers' nodes fetch it from peers and check it against its
 CID; the page shows only raster images.
 
-Names come from [Moniker](https://github.com/adalinxx/moniker), the profile
-chain Lattice apps share, through the
-[Moniker SDK](https://github.com/adalinxx/moniker-sdk) (a submodule at
-`app/vendor/moniker-sdk`, pinned to a release: clone with
-`--recurse-submodules`).
+Handles come from Moniker through the Moniker SDK (see Cards and handles).
 
 ## Client library
 
@@ -113,11 +130,11 @@ chain Lattice apps share, through the
 - `state.mjs`: reads state at a block by descending the trie, every node
   checked against its CID.
 - `geo.mjs`: geohash, the cells covering a map view, distances.
-- `write.mjs`: the writes for each act (`place`, `review`, `reply`,
+- `write.mjs`: the writes for each act (`card`, `place`, `review`, `reply`,
   `helpful`, `follow`, `followLabels`) and `changes`, which turns them into
   actions against the state they were read from.
 - `read.mjs`: places in cells, reviews of a place, replies, helpful marks,
-  everything one account wrote, follows and labels.
+  everything one account wrote, follows and labels, and cards.
 - `trust.mjs`: what a reader sees: the two averages, the recent count and
   spread, the orders, what labels do, reviewer history, "Rated like you".
 - `media.mjs`: photo Volumes and the node's operator routes.
@@ -147,9 +164,14 @@ then onto an in-memory state that the reads take.
 
 `e2e/ui/` is the acceptance suite: the real page in Chromium with the real
 Selfhold extension, against a private Lattice stack seeded with demo data
-(`scripts/seed.mjs`). Each test is something a person does, checked by what
-the page then shows: exploring and filtering, reading a place, adding a
-place and reviewing it with a new account, nearby duplicates offered first,
+(`scripts/seed.mjs`), with a Moniker chain beside it (`e2e/ui/moniker/`:
+Moniker's policy module and a spec with fast blocks). Each test is something
+a person does, checked by what the page then shows: exploring and filtering,
+reading a place, a new account making its card as it adds a place and
+reviewing it, nearby duplicates offered first, making a card and showing a
+handle (the byline shows both; a handle pointed away stops showing), a card
+name that can't pass for a handle, claiming a free handle and declining to
+stop showing it,
 editing and deleting, declining in the wallet, helpful and replies, photos
 kept by one's own node, editing a place (its author only), labels shown as
 text never markup, following, labels and their modes, duplicates,
@@ -163,11 +185,13 @@ LATTICE_WALLET=<lattice-wallet>/dist npm test
 
 `e2e/ui/live.mjs` does the same against the live trial chain from the
 published page: a new account with no coins connects Selfhold, reviews a
-place, approves the write in the wallet's window, and waits for it to land.
+place, makes its card when asked, approves the write (card and review
+together) in the wallet's window, and waits for it to land.
 
 ```sh
 LATTICE_WALLET=<lattice-wallet>/dist node e2e/ui/live.mjs
 ```
 
 `scripts/seed.mjs` writes the demo places and reviews (around Madison
-Square Park) to any Rave chain; the trial chain is seeded with it.
+Square Park) to any Rave chain: eight people, each with a Rave card and a
+handle shown on Moniker (claimed if free). The trial chain is seeded with it.
