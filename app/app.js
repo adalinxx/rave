@@ -115,7 +115,8 @@ const me = async () => connected ?? (await connectWallet());
  */
 async function sameAccount() {
   const actual = await wallet()?.address?.().catch(() => null);
-  if (actual && actual !== connected) {
+  if (!actual) throw new Said("Couldn't read Selfhold's account. Check Selfhold, then try again.");
+  if (actual !== connected) {
     setConnected(actual);
     throw new Said("Selfhold is connected to another account than this page showed. It's drawn again for that account: look, then try again.");
   }
