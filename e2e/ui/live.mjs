@@ -1,6 +1,7 @@
 // A review through the real Selfhold wallet on the live trial chain, from
-// the published page: a new account with no coins connects, rates a place
-// and approves the write in the wallet's own window, and the review lands.
+// the published page: a new account with no coins connects, rates a place,
+// makes its Rave card when the page asks, approves the one write (card and
+// review) in the wallet's own window, and the review lands.
 // The wallet keeps its default settings, so it finds the trial chain the
 // way anyone's would.
 //
@@ -64,6 +65,9 @@ await page.getByRole("radio", { name: "4 of 5 stars" }).click();
 const words = `Checked live ${new Date().toISOString()}.`;
 await page.locator("#body").fill(words);
 await page.getByRole("button", { name: "Post review" }).click();
+const dialog = page.getByRole("dialog", { name: "Make your Rave card" });
+await dialog.getByLabel("Name").fill("Live Check");
+await dialog.getByRole("button", { name: "Save card" }).click();
 const mine = page.locator("article.review", { hasText: words });
 await mine.waitFor({ timeout: 120_000 });
 console.log(`sent; waiting for its block (wallet approved [${approved}])`);

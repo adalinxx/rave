@@ -1,8 +1,11 @@
 // Rave in the browser: reads every record from a node by CID, decides here
 // what to show (by whom the reader follows and whose labels they use), and
 // asks the reader's Selfhold wallet to sign each write. No server of its own.
+//
+// An account is shown by its Rave card (`user/<a>/card` on Rave's chain) and
+// the @handle Moniker verifies for it, read through the Moniker SDK.
 import * as sdk from "./vendor/lattice-sdk.js";
-import { createMoniker, DEFAULTS as MONIKER } from "./vendor/moniker-sdk/src/index.mjs";
+import { createMoniker, DEFAULTS as MONIKER, isHandle } from "./vendor/moniker-sdk/src/index.mjs";
 import * as geo from "../client/geo.mjs";
 import { mediaVolume, operator } from "../client/media.mjs";
 import * as read from "../client/read.mjs";
@@ -10,8 +13,8 @@ import { tip, view, volumeLoader } from "../client/state.mjs";
 import * as trust from "../client/trust.mjs";
 import * as write from "../client/write.mjs";
 import {
-  CATEGORIES, STAR_WORDS, ago, average, esc, initials, labelText, metres, monthYear, nameOf, parseRoute, placeHref,
-  plural, safeLink, sameName, short, sparkline, starPath, stars, userHref, when,
+  CATEGORIES, STAR_WORDS, ago, average, bylineHTML, esc, initials, labelText, metres, monthYear, nameOf, parseRoute, placeHref,
+  plural, safeLink, sameName, sparkline, starPath, stars, userHref, when,
 } from "./lib.mjs";
 
 const $ = (selector, root = document) => root.querySelector(selector);
@@ -51,15 +54,14 @@ const nodeAddress = (url) => {
     return null;
   }
 };
-// A link may carry ?node=, ?chain= or ?moniker=; it is kept as this browser's choice.
-for (const [param, key] of [["node", "node"], ["chain", "chain"], ["moniker", "monikerChain"]]) {
-  const value = new URLSearchParams(location.search).get(param);
-  if (value) store.set(key, value);
-}
+// A link may carry ?node=, ?chain= or ?moniker=: they hold for this visit
+// only. Only Settings keeps a choice, so a link can't change what later
+// visits read (or which handles they take as verified).
+const linked = (param) => new URLSearchParams(location.search).get(param) || null;
 const settings = {
-  node: nodeAddress(store.get("node", DEFAULTS.node)) ?? DEFAULTS.node,
-  chain: store.get("chain", DEFAULTS.chain),
-  moniker: store.get("monikerChain", null) ?? MONIKER.chain.join("/"),
+  node: nodeAddress(linked("node") ?? store.get("node", DEFAULTS.node)) ?? DEFAULTS.node,
+  chain: linked("chain") ?? store.get("chain", DEFAULTS.chain),
+  moniker: linked("moniker") ?? store.get("monikerChain", null) ?? MONIKER.chain.join("/"),
   // The reader's own node, which keeps their photos: its operator address and cookie.
   ownNode: store.get("ownNode", ""),
   ownCookie: store.get("ownCookie", ""),
@@ -83,6 +85,8 @@ const wallet = () => window.lattice ?? null;
 class NoWallet extends Error {}
 /** An error already in the page's words. */
 class Said extends Error {}
+/** The reader closed a step the write needed (making their card): nothing to say. */
+class Cancelled extends Said {}
 /** The form was made from an older picture of the chain: it is drawn again, with this said. */
 class Redraw extends Said {}
 let redrawNote = "";
@@ -103,6 +107,21 @@ async function connectWallet() {
 }
 /** The reader's address, connecting first if needed. */
 const me = async () => connected ?? (await connectWallet());
+
+/**
+ * The wallet's account now, which must be the one the page is drawn for
+ * (`connected`): a write never goes from another. On a mismatch the page is
+ * drawn again for the wallet's account, and this throws.
+ */
+async function sameAccount() {
+  const actual = await wallet()?.address?.().catch(() => null);
+  if (!actual) throw new Said("Couldn't read Selfhold's account. Check Selfhold, then try again.");
+  if (actual !== connected) {
+    setConnected(actual);
+    throw new Said("Selfhold is connected to another account than this page showed. It's drawn again for that account: look, then try again.");
+  }
+  return connected;
+}
 
 function setConnected(address) {
   if (address === connected) return;
@@ -194,11 +213,12 @@ const state = async (options) => overlaid(await chainState(options));
 const isPending = (key) => pending.has(key);
 const recordKey = (author, id) => `user/${author}/post/${id}`;
 
-async function feeFor() {
+/** The fee `path`'s nodes ask of a transaction (minRelayFee), or 0 when they don't say. */
+async function feeFor(path = chainPath()) {
   try {
-    const info = await nodes.read(chainPath(), async (node) => {
+    const info = await nodes.read(path, async (node) => {
       const url = new URL(`${node.url}/api/chain/info`);
-      url.searchParams.set("chainPath", chainPath().join("/"));
+      url.searchParams.set("chainPath", path.join("/"));
       const response = await fetch(url);
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
       return response.json();
@@ -210,17 +230,26 @@ async function feeFor() {
 }
 
 /**
- * Sends `build(address)`'s writes through the wallet. Resolves once the
- * wallet has sent them (they then show as pending); `landed` settles when
- * they are in a block. Throws NoWallet or Said.
+ * Sends `build(address)`'s writes through the wallet. `as` is the account
+ * the form was drawn for, if one was: a write never goes from another. An
+ * account with no Rave card yet is asked for one first, and it goes in the
+ * same transaction; `card` sends one as given. Resolves once the wallet has
+ * sent them (they then show as pending); `landed` settles when they are in a
+ * block. Throws NoWallet or Said.
  */
-async function send(build, { status = () => {}, what = "This" } = {}) {
+async function send(build, { status = () => {}, what = "This", as, card } = {}) {
   let address;
   try {
     address = await me();
   } catch (error) {
     if (error instanceof NoWallet) throw error;
     throw new Said(walletMessage(error));
+  }
+  address = await sameAccount();
+  if (as && as !== address) throw new Said("Selfhold is connected to another account than this was drawn for. Look again, then try.");
+  if (!card && !(await hasCard(address))) {
+    card = await askCard({ why: `${what} goes out under your Rave card. Make it first: it's what people see on what you write.` });
+    if (!card) throw new Cancelled("");
   }
   status("Preparing…");
   let actions;
@@ -230,7 +259,7 @@ async function send(build, { status = () => {}, what = "This" } = {}) {
       status("Approve it in Selfhold…");
       // Made against the newest state, so each oldValue is what the key holds.
       const base = await chainState({ fresh: true });
-      actions = await write.changes(overlaid(base), await build(address));
+      actions = await write.changes(overlaid(base), [...(card ? write.card(address, card) : []), ...(await build(address))]);
       if (!actions.length) return;
       // A key still waiting on an earlier write can't be changed yet.
       if (actions.some((a) => pending.has(a.key))) throw new Said(`Your last change is still landing. Try again once it has.`);
@@ -242,17 +271,34 @@ async function send(build, { status = () => {}, what = "This" } = {}) {
     if (!/may still land/i.test(String(error?.message ?? error))) throw new Said(walletMessage(error));
   }
   if (!actions.length) return { landed: Promise.resolve(true) };
+  // A card is remembered until a block has it, so a reload doesn't ask again.
+  if (card) store.set(cardKey(address), Date.now());
   const batch = {};
   for (const a of actions) pending.set(a.key, { value: a.newValue, batch });
+  reader = null;
   render();
   const landed = landing(actions, batch).then((ok) => {
     for (const a of actions) if (pending.get(a.key)?.batch === batch) pending.delete(a.key);
     current = null;
+    reader = null;
     if (!ok) toast(`${what} didn't land in a block after 15 minutes. It wasn't saved; try again.`, { bad: true });
     render();
     return ok;
   });
   return { landed };
+}
+
+// A card this browser sent and no block had yet, per account: when it was sent.
+const cardKey = (account) => `card-sent:${account}`;
+/** Whether `account` has a card: on the chain, waiting in this page, or sent from this browser in the last 15 minutes. */
+async function hasCard(account) {
+  // A card counts only if it reads as one: a broken one asks for a new card.
+  if (await read.card(await chainState(), account)) {
+    store.set(cardKey(account), undefined);
+    return true;
+  }
+  if (pending.has(`user/${account}/card`)) return Boolean(await read.card(await state(), account));
+  return Date.now() - store.get(cardKey(account), 0) < 15 * 60_000;
 }
 
 async function landing(actions, batch) {
@@ -326,51 +372,60 @@ async function shrink(file) {
 
 // ---------------------------------------------------------------- names
 
-// Names come from Moniker cards, read once per address per visit.
-// Moniker's own hosts serve only Moniker's chain: another chain is read from the reader's node alone.
+// An account is shown by its Rave card, read from this chain, and the
+// @handle Moniker verifies for it, through the Moniker SDK. Moniker's own
+// hosts serve only Moniker's chain: another chain is read from the reader's
+// node alone.
 const monikerNodes = settings.moniker === MONIKER.chain.join("/") ? [settings.node, ...MONIKER.nodes.filter((n) => n !== settings.node)] : [settings.node];
-const moniker = createMoniker({ sdk, chain: settings.moniker.split("/"), nodes: monikerNodes });
-const names = new Map(); // address -> label
-const avatars = new Map(); // address -> avatar CID
-const asked = new Set();
+const moniker = createMoniker({ sdk, chain: settings.moniker.split("/"), nodes: monikerNodes, freshFor: 3000 });
+/** A Moniker client for writing, proposing the fee Moniker's nodes ask. */
+const monikerWriter = async () => createMoniker({ sdk, chain: settings.moniker.split("/"), nodes: monikerNodes, freshFor: 3000, fee: await feeFor(settings.moniker.split("/")) });
+
+const known = new Map(); // address -> { card?, handle? }
+// When each account was last read: its handle is checked again after this long.
+const asked = new Map();
+const VERIFIED_FOR = 10_000;
 async function learnNames(addresses) {
-  const wanted = [...new Set(addresses)].filter((a) => a && !asked.has(a));
+  const wanted = [...new Set(addresses)].filter((a) => a && !(Date.now() - (asked.get(a) ?? 0) < VERIFIED_FOR));
   if (!wanted.length) return;
-  wanted.forEach((a) => asked.add(a));
+  wanted.forEach((a) => asked.set(a, Date.now()));
   try {
-    const profiles = await moniker.profiles(wanted);
-    profiles.forEach((p, i) => {
-      if (!p) return;
-      const label = p.name || (p.handle ? `@${p.handle}` : "");
-      if (label) names.set(wanted[i], label);
-      if (p.avatar) avatars.set(wanted[i], p.avatar);
-    });
+    const [cards, handles] = await Promise.all([state().then((s) => read.cards(s, wanted)), moniker.handlesOf(wanted).catch(() => [])]);
+    wanted.forEach((a, i) => known.set(a, { card: cards[i], handle: handles[i] }));
   } catch {
     wanted.forEach((a) => asked.delete(a));
     return;
   }
-  // Fill in every name already on the page.
-  for (const el of $$("[data-name]")) {
-    const a = el.dataset.name;
-    if (names.has(a)) el.textContent = names.get(a);
-  }
-  for (const el of $$("[data-initials]")) {
-    const a = el.dataset.initials;
-    if (names.has(a) && !el.querySelector("img")) el.textContent = initials(names.get(a));
+  showNames(wanted);
+}
+/** Fills in every byline and avatar of `addresses` already on the page. */
+function showNames(addresses) {
+  for (const a of addresses) {
+    const who = known.get(a);
+    if (!who) continue;
+    for (const el of $$(`[data-name="${CSS.escape(a)}"]`)) el.innerHTML = bylineHTML(a, who);
+    for (const el of $$(`[data-initials="${CSS.escape(a)}"]`)) {
+      if (!el.querySelector("img")) el.textContent = initials(nameOf(a, who));
+      const cid = who.card?.photo;
+      if (cid) photoURL(cid).then((url) => url && el.isConnected && (el.innerHTML = `<img alt="" src="${esc(url)}">`));
+    }
   }
 }
-const nameTag = (a) => `<span data-name="${esc(a)}">${esc(nameOf(a, names))}</span>`;
-const avatarTag = (a) => `<span class="avatar" data-initials="${esc(a)}" aria-hidden="true">${esc(names.has(a) ? initials(names.get(a)) : a.slice(1, 3).toUpperCase())}</span>`;
+const nameTag = (a) => `<span data-name="${esc(a)}">${bylineHTML(a, known.get(a))}</span>`;
+const avatarTag = (a) => `<span class="avatar" data-initials="${esc(a)}" aria-hidden="true">${known.has(a) ? esc(initials(nameOf(a, known.get(a)))) : ""}</span>`;
 
 // ---------------------------------------------------------- the reader
 
-// Whom the connected reader follows and whose labels they use, from the chain.
-let reader = null; // { address, follows: Set, labelers: Set, at }
+// The connected reader's card and handle, whom they follow and whose labels they use, from the chains.
+let reader = null; // { address, card, handle, follows: Set, labelers: Set, hash }
 async function readerOf(s) {
   if (!connected) return { address: null, follows: new Set(), labelers: new Set() };
   if (reader && reader.address === connected && reader.hash === s.hash && !pending.size) return reader;
-  const [follows, labelers] = await Promise.all([read.follows(s, connected), read.labelers(s, connected)]);
-  reader = { address: connected, hash: s.hash, follows: new Set(follows), labelers: new Set(labelers) };
+  const [follows, labelers, card, handle] = await Promise.all([
+    read.follows(s, connected), read.labelers(s, connected), read.card(s, connected), moniker.handleOf(connected).catch(() => undefined),
+  ]);
+  known.set(connected, { card, handle });
+  reader = { address: connected, hash: s.hash, card, handle, follows: new Set(follows), labelers: new Set(labelers) };
   return reader;
 }
 
@@ -702,6 +757,7 @@ async function place(panel, route, stale, arrived) {
   if (!paint(panel, stale, html)) return;
   if (matchMedia("(min-width: 900px)").matches) showPins([p], { on: p, fit: true });
   showPhotos(panel);
+  showNames([p.author, ...all.map((r) => r.author)]);
   wirePlace(panel, p, all, who);
 }
 
@@ -775,20 +831,21 @@ function wirePlace(panel, p, all, who) {
     const on = b.getAttribute("aria-pressed") !== "true";
     b.disabled = true;
     try {
-      await send((a) => write.helpful(a, r, on), { what: "Your helpful mark" });
+      await send((a) => write.helpful(a, r, on), { what: "Your helpful mark", as: who.address });
     } catch (error) {
       b.disabled = false;
       failed(error, "Marking a review helpful");
     }
   }));
-  $$("[data-reply]", panel).forEach((b) => b.addEventListener("click", () => openReply(reviewOf(b.dataset.reply))));
-  $$("[data-label-review]", panel).forEach((b) => b.addEventListener("click", () => openLabel(reviewOf(b.dataset.labelReview), "review")));
-  $("[data-label-place]", panel)?.addEventListener("click", () => openLabel(p, "place"));
+  $$("[data-reply]", panel).forEach((b) => b.addEventListener("click", () => openReply(reviewOf(b.dataset.reply), who.address)));
+  $$("[data-label-review]", panel).forEach((b) => b.addEventListener("click", () => openLabel(reviewOf(b.dataset.labelReview), "review", who.address)));
+  $("[data-label-place]", panel)?.addEventListener("click", () => openLabel(p, "place", who.address));
 }
 
 /** A failed write, said where the reader is looking. */
 function failed(error, what) {
   if (error instanceof NoWallet) return needWallet(`${what} needs Selfhold.`);
+  if (error instanceof Cancelled) return;
   toast(error instanceof Said ? error.message : walletMessage(error), { bad: true });
 }
 
@@ -800,9 +857,16 @@ for (const dialog of $$("dialog")) {
   });
   dialog.addEventListener("cancel", (e) => dialog.hasAttribute("data-busy") && e.preventDefault());
 }
+// Enter in a field sends, as the dialog's main button does.
+for (const [form, button] of [["#card-dialog form", "#cd-send"], ["#handle-dialog form", "#hd-send"]]) {
+  $(form).addEventListener("submit", (e) => {
+    e.preventDefault();
+    $(button).click();
+  });
+}
 
 /** Runs a dialog's send: the button and fields lock while the wallet is asked. */
-async function sendFromDialog(dialog, statusEl, button, build, what, done) {
+async function sendFromDialog(dialog, statusEl, button, build, what, done, as) {
   const lock = (on) => {
     dialog.toggleAttribute("data-busy", on);
     button.disabled = on;
@@ -811,7 +875,7 @@ async function sendFromDialog(dialog, statusEl, button, build, what, done) {
   lock(true);
   statusEl.classList.remove("bad");
   try {
-    const { landed } = await send(build, { status: (t) => (statusEl.textContent = t), what });
+    const { landed } = await send(build, { status: (t) => (statusEl.textContent = t), what, as });
     lock(false);
     dialog.close();
     done?.(landed);
@@ -822,11 +886,11 @@ async function sendFromDialog(dialog, statusEl, button, build, what, done) {
       return needWallet(`${what} needs Selfhold.`);
     }
     statusEl.textContent = error instanceof Said ? error.message : walletMessage(error);
-    statusEl.classList.add("bad");
+    if (!(error instanceof Cancelled)) statusEl.classList.add("bad");
   }
 }
 
-function openReply(target) {
+function openReply(target, as) {
   const dialog = $("#reply-dialog");
   $("#rd-about").innerHTML = `To ${nameTag(target.author)}'s review. Replies are public, and anyone can reply, owners included.`;
   $("#rd-body").value = "";
@@ -839,11 +903,11 @@ function openReply(target) {
       $("#rd-status").textContent = "Write something first.";
       return;
     }
-    sendFromDialog(dialog, $("#rd-status"), $("#rd-send"), (a) => write.reply(a, write.newId(), target, { body }), "Your reply");
+    sendFromDialog(dialog, $("#rd-status"), $("#rd-send"), (a) => write.reply(a, write.newId(), target, { body }), "Your reply", undefined, as);
   };
 }
 
-async function openLabel(target, kind) {
+async function openLabel(target, kind, as) {
   const dialog = $("#label-dialog");
   const choices = kind === "place" ? [["closed", "Closed"], ["same-as", "Duplicate"]] : [["paid", "Paid for"], ["fake", "Fake"], ["spam", "Spam"]];
   let picked = choices[0][0];
@@ -883,7 +947,7 @@ async function openLabel(target, kind) {
     }
     const body = $("#ld-body").value.trim();
     sendFromDialog(dialog, $("#ld-status"), $("#ld-send"), (a) => write.reply(a, write.newId(), target, { body, labels: [label] }), "Your label", () =>
-      toast("Labelled. People who use your labels will see it."));
+      toast("Labelled. People who use your labels will see it."), as);
   };
 }
 
@@ -896,6 +960,7 @@ async function writeView(panel, route, stale) {
   const p = await read.place(s, route.place.author, route.place.id);
   if (stale()) return;
   if (!p) return paint(panel, stale, `<div class="empty"><p>This place isn't on Rave.</p></div>`);
+  const drawnFor = connected;
   const mine = connected ? await read.reviewOf(s, connected, p) : undefined;
   if (stale()) return;
   const draft = drafts.get(key) ?? { stars: mine?.stars ?? 0, body: mine?.body ?? "", media: mine?.media ?? [] };
@@ -986,7 +1051,7 @@ async function writeView(panel, route, stale) {
     buttons.forEach((b) => (b.disabled = true));
     statusEl.classList.remove("bad");
     try {
-      await send(build, { status: (t) => (statusEl.textContent = t), what });
+      await send(build, { status: (t) => (statusEl.textContent = t), what, as: drawnFor });
       drafts.delete(key);
       after();
     } catch (error) {
@@ -997,12 +1062,12 @@ async function writeView(panel, route, stale) {
         return needWallet("Posting a review needs Selfhold.");
       }
       if (error instanceof Redraw) {
-        drafts.delete(key);
+        // What they typed stays; the form is drawn again as an edit of the review they have.
         redrawNote = error.message;
         return render();
       }
       statusEl.textContent = error instanceof Said ? error.message : walletMessage(error);
-      statusEl.classList.add("bad");
+      if (!(error instanceof Cancelled)) statusEl.classList.add("bad");
     }
   };
   $("#post").addEventListener("click", () => {
@@ -1015,7 +1080,7 @@ async function writeView(panel, route, stale) {
       const existing = await read.reviewOf(now, a, p);
       // A review this form wasn't made from (it was drawn before connecting)
       // is never overwritten unseen.
-      if (existing?.id !== mine?.id) throw new Redraw("You've already reviewed this place. Here's your review: change it, then save.");
+      if (existing?.id !== mine?.id) throw new Redraw("You've already reviewed this place. What you wrote is kept here: save it to replace that review.");
       return existing
         ? write.review(a, existing.id, p, value, { edited: Date.now(), mediaCIDs, before: await read.mediaSlots(now, a, existing.id) })
         : write.review(a, write.newId(), p, value, { mediaCIDs });
@@ -1045,6 +1110,7 @@ async function addView(panel, route, stale, arrived) {
   markers?.clearLayers();
   // Editing: only a place's author can change its details.
   const editing = route.view === "edit" ? route.place : null;
+  const drawnFor = connected;
   let before = null;
   if (editing) {
     const s = await state();
@@ -1158,7 +1224,7 @@ async function addView(panel, route, stale, arrived) {
         author = a;
         // An edit moves the listing from where the place stands now.
         return write.place(a, pid, value, editing ? await read.place(await state({ fresh: true }), a, pid) : undefined);
-      }, { status: (t) => ($("#a-status").textContent = t), what: editing ? "Your changes" : "Your place" });
+      }, { status: (t) => ($("#a-status").textContent = t), what: editing ? "Your changes" : "Your place", as: drawnFor });
       Object.assign(form, { name: "", category: "", address: "", url: "", phone: "", hours: "" });
       if (editing) {
         editDraft.key = "";
@@ -1175,7 +1241,7 @@ async function addView(panel, route, stale, arrived) {
         return needWallet("Adding a place needs Selfhold.");
       }
       $("#a-status").textContent = error instanceof Said ? error.message : walletMessage(error);
-      $("#a-status").classList.add("bad");
+      if (!(error instanceof Cancelled)) $("#a-status").classList.add("bad");
     }
   }
   await look();
@@ -1227,7 +1293,7 @@ async function following(panel, route, stale) {
   $$("[data-follow]", panel).forEach((b) => b.addEventListener("click", async () => {
     b.disabled = true;
     try {
-      await send((a) => write.follow(a, b.dataset.follow), { what: "Following" });
+      await send((a) => write.follow(a, b.dataset.follow), { what: "Following", as: who.address });
     } catch (error) {
       b.disabled = false;
       failed(error, "Following someone");
@@ -1243,10 +1309,15 @@ async function reviewer(panel, route, stale) {
   panel.innerHTML ||= `<p class="skeleton">Loading…</p>`;
   const s = await state();
   const who = await readerOf(s);
-  const theirs = await read.by(s, a);
+  const [theirs, card, handle] = await Promise.all([read.by(s, a), read.card(s, a), moniker.handleOf(a).catch(() => undefined)]);
   const placesOf = await Promise.all(theirs.reviews.map((r) => read.place(s, r.on.author, r.on.id)));
   if (stale()) return;
-  learnNames([a]);
+  known.set(a, { card, handle });
+  asked.set(a, Date.now());
+  const about = [
+    handle && `<a href="${esc(moniker.pageURL(handle))}" target="_blank" rel="noopener">@${esc(handle)} on Moniker</a>`,
+    card?.bio && esc(card.bio),
+  ].filter(Boolean).join(" · ");
   const h = trust.history(theirs.reviews);
   const rows = theirs.reviews.map((r, i) => [r, placesOf[i]]).filter(([, p]) => p).sort(([x], [y]) => y.time - x.time);
   const max = Math.max(1, ...h.spread);
@@ -1257,7 +1328,7 @@ async function reviewer(panel, route, stale) {
   const labelsPending = isPending(`user/${who.address}/follow-labels/${a}`);
   const html = `
     <div class="top"><button type="button" class="back" data-back>${backIcon}Back</button></div>
-    <header class="profile">${avatarTag(a)}<div><h1 class="title" style="font-size:24px">${nameTag(a)}</h1><div class="small muted">${short(a)} · <a href="${esc(moniker.pageURL(a))}" target="_blank" rel="noopener">Moniker page</a></div></div></header>
+    <header class="profile">${avatarTag(a)}<div><h1 class="title" style="font-size:24px">${nameTag(a)}</h1>${about ? `<div class="small muted">${about}</div>` : ""}</div></header>
     ${isMe ? "" : `<div class="two">
       <button type="button" class="btn${follows ? " quiet" : ""}" data-toggle-follow aria-pressed="${follows}"${followPending ? " disabled" : ""}>${followPending ? "Saving…" : follows ? "Following" : "Follow"}</button>
       <button type="button" class="btn${usesLabels ? " quiet" : ""}" data-toggle-labels aria-pressed="${usesLabels}"${labelsPending ? " disabled" : ""}>${labelsPending ? "Saving…" : usesLabels ? "Using their labels" : "Use their labels"}</button>
@@ -1273,13 +1344,14 @@ async function reviewer(panel, route, stale) {
     <h2 class="section-title" style="font-size:16px">Reviews</h2>
     ${rows.length ? rows.map(([r, p]) => `<a class="row" href="${placeHref(p)}"><span class="main"><span class="name">${esc(p.name)}</span><span class="sub">${ago(r.time)}${r.body ? ` · ${esc(r.body.slice(0, 80))}${r.body.length > 80 ? "…" : ""}` : ""}</span></span><span class="rating">${r.stars} ★</span></a>`).join("") : `<div class="empty"><p>No reviews yet.</p></div>`}`;
   if (!paint(panel, stale, html)) return;
+  showNames([a]);
   $("[data-back]", panel).addEventListener("click", () => (history.length > 1 ? history.back() : (location.hash = "#/following")));
   showPins(rows.map(([, p]) => p), { fit: true });
   const toggle = (attr, make, on, what) => $(`[${attr}]`, panel)?.addEventListener("click", async (e) => {
-    const button = e.currentTarget;
+    const button = e.currentTarget; // before any await: it is null after
     button.disabled = true;
     try {
-      await send((me) => make(me, a, !on), { what });
+      await send((me) => make(me, a, !on), { what, as: who.address });
     } catch (error) {
       button.disabled = false;
       failed(error, what);
@@ -1317,12 +1389,23 @@ async function you(panel, route, stale) {
   panel.innerHTML ||= `<p class="skeleton">Loading…</p>`;
   const s = await state();
   const who = await readerOf(s);
-  const mine = await read.by(s, who.address);
+  const [mine, carded] = await Promise.all([read.by(s, who.address), hasCard(who.address)]);
   if (stale()) return;
-  learnNames([who.address, ...who.follows, ...who.labelers]);
-  const known = ["paid", "fake", "spam", "closed", "same-as"];
+  learnNames([...who.follows, ...who.labelers]);
+  const labelNames = ["paid", "fake", "spam", "closed", "same-as"];
+  const waiting = handleWaits.get(who.address);
+  const handleLine = waiting !== undefined && who.handle !== (waiting || undefined)
+    ? `${waiting ? `@${esc(waiting)}` : "No handle"} · <span class="pending-note">Waiting for a block…</span>`
+    : who.handle
+      ? `<a href="${esc(moniker.pageURL(who.handle))}" target="_blank" rel="noopener">@${esc(who.handle)} on Moniker</a> · <button type="button" class="linkish small" data-handle>Change</button> · <button type="button" class="linkish small" data-stop-handle>Stop showing it</button>`
+      : `No handle yet · <button type="button" class="linkish small" data-handle>Use a handle</button>`;
   const html = `
-    <header class="profile" style="padding-top:20px">${avatarTag(who.address)}<div><h1 class="title" style="font-size:24px">${nameTag(who.address)}</h1><div class="small muted">${short(who.address)} · <a href="${esc(moniker.pageURL(who.address))}" target="_blank" rel="noopener">Your Moniker page</a></div></div></header>
+    <header class="profile" style="padding-top:20px">${avatarTag(who.address)}<div><h1 class="title" style="font-size:24px">${nameTag(who.address)}</h1>
+      ${who.card?.bio ? `<div class="small muted">${esc(who.card.bio)}</div>` : ""}
+      <div class="small muted" data-handle-line>${handleLine}</div></div></header>
+    ${carded
+      ? `<div class="actions" style="padding:8px 16px 0"><button type="button" class="btn quiet small" data-edit-card>Edit your card</button></div>`
+      : `<div class="notice" style="margin:12px 16px 0">People see your reviews under your Rave card: a name, a few words, a photo if you like. Your account itself is never shown. <div class="actions" style="padding:8px 0 0"><button type="button" class="btn small" data-edit-card>Make your card</button></div></div>`}
     <nav aria-label="Your things" style="margin-top:16px">
       <a class="nav-row" href="${userHref(who.address)}"><span>Your reviews</span><span class="muted">${mine.reviews.length} ›</span></a>
       <a class="nav-row" href="#/following"><span>People you follow</span><span class="muted">${who.follows.size} ›</span></a>
@@ -1331,7 +1414,7 @@ async function you(panel, route, stale) {
       <h2 class="section-title" id="labels-title">Labels</h2>
       <p class="small muted" style="margin:0;padding:0 16px">Labels are replies from accounts you chose. Nothing is ever deleted; you decide what each label does on your screen. To use someone's labels, open their page and tap Use their labels.</p>
       ${who.labelers.size ? [...who.labelers].map((l) => `<div class="labeler"><div class="head"><a href="${userHref(l)}" style="font-weight:700;color:var(--ink);text-decoration:none">${nameTag(l)}</a></div>
-        ${known.map((name) => `<div class="line"><span>${esc(labelText(name))}</span><div class="seg" role="radiogroup" aria-label="${esc(labelText(name))} from ${esc(nameOf(l, names))}">${["show", "warn", "hide"].map((m) => `<button type="button" role="radio" aria-checked="${modeOf(l, name) === m}" data-mode="${esc(`${l}/${name}`)}" data-value="${m}">${m[0].toUpperCase() + m.slice(1)}</button>`).join("")}</div></div>`).join("")}
+        ${labelNames.map((name) => `<div class="line"><span>${esc(labelText(name))}</span><div class="seg" role="radiogroup" aria-label="${esc(labelText(name))} from ${esc(nameOf(l, known.get(l)))}">${["show", "warn", "hide"].map((m) => `<button type="button" role="radio" aria-checked="${modeOf(l, name) === m}" data-mode="${esc(`${l}/${name}`)}" data-value="${m}">${m[0].toUpperCase() + m.slice(1)}</button>`).join("")}</div></div>`).join("")}
       </div>`).join("") : `<p class="small muted" style="padding:8px 16px 0;margin:0">You don't use anyone's labels yet, so you see every review as written.</p>`}
     </section>
     <nav aria-label="Settings" style="margin:20px 0 24px">
@@ -1347,18 +1430,215 @@ async function you(panel, route, stale) {
     await wallet()?.disconnect().catch(() => {});
     setConnected(null);
   });
+  showNames([who.address, ...who.follows, ...who.labelers]);
+  $("[data-edit-card]", panel)?.addEventListener("click", async (e) => {
+    const button = e.currentTarget; // before any await: it is null after
+    const card = await askCard({ card: who.card });
+    if (!card) return;
+    button.disabled = true;
+    try {
+      await send(() => [], { what: "Your card", card, as: who.address });
+      toast("Your card is saved. It shows as waiting until its block lands.");
+    } catch (error) {
+      button.disabled = false;
+      failed(error, "Saving your card");
+    }
+  });
+  $("[data-handle]", panel)?.addEventListener("click", () => openHandle(who.address));
+  $("[data-stop-handle]", panel)?.addEventListener("click", async (e) => {
+    const button = e.currentTarget; // before any await: it is null after
+    button.disabled = true;
+    try {
+      await sameAccount();
+      const writer = await within(15_000, monikerWriter());
+      await viaWallet(async () => {
+        await sameAccount();
+        return writer.stopShowing({ wallet: wallet() });
+      });
+      toast("Your handle stops showing once its block lands.");
+      waitForHandle(who.address, "");
+    } catch (error) {
+      button.disabled = false;
+      toast(walletMessage(error), { bad: true });
+    }
+  });
+}
+
+// A handle the reader asked to show ("" for none), until Moniker says so.
+const handleWaits = new Map(); // address -> handle
+
+/** `promise`, or a rejection after `ms`: a read that hangs doesn't hold a dialog forever. */
+const within = (ms, promise) =>
+  Promise.race([promise, new Promise((_, reject) => setTimeout(() => reject(new Error("The node didn't answer in time. Try again.")), ms))]);
+
+/** Polls until Moniker verifies `handle` for `account` ("" for none), then draws again. */
+async function waitForHandle(account, handle) {
+  handleWaits.set(account, handle);
+  render();
+  const started = Date.now();
+  while (Date.now() - started < 15 * 60_000) {
+    await new Promise((resolve) => setTimeout(resolve, 3000));
+    if (((await moniker.handleOf(account).catch(() => null)) ?? "") === handle) break;
+  }
+  if (handleWaits.get(account) === handle) handleWaits.delete(account);
+  asked.delete(account);
+  reader = null;
+  render();
+}
+
+/** The dialog that shows one of the account's Moniker names, or claims a free one and shows it. */
+async function openHandle(account) {
+  const dialog = $("#handle-dialog");
+  const list = $("#hd-names");
+  $("#hd-new").value = "";
+  $("#hd-status").textContent = "";
+  $("#hd-status").classList.remove("bad");
+  $$("input, button", dialog).forEach((f) => (f.disabled = false));
+  list.innerHTML = `<p class="small muted" style="margin:0">Looking up your names…</p>`;
+  dialog.showModal();
+  // Closing the dialog stops whatever it is waiting for, short of the wallet.
+  let open = true;
+  dialog.addEventListener("close", () => (open = false), { once: true });
+  let names = [];
+  try {
+    names = await within(15_000, moniker.names(account));
+  } catch {
+    /* none listed: a new one can still be claimed */
+  }
+  if (!open) return;
+  list.innerHTML = names.length
+    ? `<fieldset style="border:0;padding:0;margin:0"><legend class="small" style="font-weight:600">Your names on Moniker</legend>${names.map((n, i) => `<label style="display:flex;gap:8px;align-items:center;min-height:40px"><input type="radio" name="handle" value="${esc(n.handle)}"${i === 0 ? " checked" : ""}> @${esc(n.handle)}</label>`).join("")}</fieldset>`
+    : `<p class="small muted" style="margin:0">You have no names on Moniker yet. Claim a free one below.</p>`;
+  $("#hd-send").onclick = async () => {
+    const typed = $("#hd-new").value.trim().replace(/^@/, "");
+    const h = typed || $("input[name=handle]:checked", dialog)?.value;
+    const status = $("#hd-status");
+    status.classList.remove("bad");
+    const say = (text) => {
+      status.textContent = text;
+      status.classList.add("bad");
+    };
+    if (!h) return say("Pick one of your names, or type a free one.");
+    if (!isHandle(h)) return say("A handle is lowercase letters, digits and _.");
+    // Fields lock while it works; Cancel stays open until the wallet is asked.
+    const lock = (on, { asking = false } = {}) => {
+      dialog.toggleAttribute("data-busy", on && asking);
+      $$("input, button:not([data-close])", dialog).forEach((f) => (f.disabled = on));
+      $("[data-close]", dialog).disabled = on && asking;
+    };
+    lock(true);
+    try {
+      const writer = await within(15_000, monikerWriter());
+      const entry = await within(15_000, writer.name(h));
+      if (!open) return;
+      if (entry && entry.owner !== account && entry.pointer !== account) {
+        lock(false);
+        return say(`@${h} is someone else's${entry.price !== undefined ? ": it's for sale on Moniker" : ""}.`);
+      }
+      lock(true, { asking: true });
+      if (!entry) {
+        // A free name: claimed, pointed at you and shown, in one transaction.
+        status.textContent = "Approve it in Selfhold: Moniker gives you the name and shows it.";
+        await viaWallet(async () => {
+          await sameAccount();
+          return writer.claim(h, { show: true }, { wallet: wallet() });
+        });
+      } else {
+        status.textContent = "Approve it in Selfhold: Moniker shows the name for you.";
+        await viaWallet(async () => {
+          await sameAccount();
+          return writer.showName(h, { wallet: wallet() });
+        });
+      }
+      lock(false);
+      dialog.close();
+      toast(`You show @${h} once Moniker's block lands.`);
+      waitForHandle(account, h);
+    } catch (error) {
+      lock(false);
+      say(walletMessage(error));
+    }
+  };
+}
+
+/**
+ * Asks for the reader's Rave card: `{ name, bio?, photo? }`, or null if they
+ * close the dialog. `card` fills it in to edit; `why` says what it is for.
+ */
+function askCard({ card, why = "" } = {}) {
+  const dialog = $("#card-dialog");
+  $("#cd-title").textContent = card ? "Edit your card" : "Make your Rave card";
+  $("#cd-why").textContent = why;
+  $("#cd-why").hidden = !why;
+  $("#cd-name").value = card?.name ?? "";
+  $("#cd-bio").value = card?.bio ?? "";
+  $("#cd-status").textContent = "";
+  $("#cd-status").classList.remove("bad");
+  $("#cd-send").disabled = false;
+  let photo = card?.photo;
+  const box = $("#cd-photo");
+  box.innerHTML = settings.ownNode && settings.ownCookie
+    ? `<label class="btn quiet small" style="align-self:flex-start">${photo ? "Change photo" : "Add a photo"}<input id="cd-file" type="file" accept="image/png,image/jpeg,image/webp" class="sr"></label><span class="small muted" id="cd-photo-note">Your node, ${esc(hostOf(settings.ownNode))}, keeps it.</span>`
+    : `<span class="small muted">To add a photo, <a href="#/settings">add your node in Settings</a>: it keeps your photos.</span>`;
+  $("#cd-file")?.addEventListener("change", async (e) => {
+    const file = e.target.files[0];
+    e.target.value = "";
+    if (!file) return;
+    const note = $("#cd-photo-note");
+    note.classList.remove("bad");
+    note.textContent = "Keeping it on your node…";
+    // The card waits for its photo.
+    $("#cd-send").disabled = true;
+    try {
+      const small = await shrink(file);
+      if (small.bytes.length > PHOTO_MAX) throw new Error(`${file.name} is too large even made smaller`);
+      const volume = mediaVolume(sdk, small.type, small.bytes);
+      await within(60_000, operator(settings.ownNode, settings.ownCookie).pin(volume));
+      photo = volume.cid;
+      note.innerHTML = `<img alt="Your photo" src="${esc(URL.createObjectURL(new Blob([small.bytes], { type: small.type })))}" style="height:48px;width:48px;border-radius:24px;object-fit:cover;vertical-align:middle"> Your node keeps it.`;
+    } catch (error) {
+      note.textContent = `Your node didn't keep it: ${error.message}.`;
+      note.classList.add("bad");
+    } finally {
+      $("#cd-send").disabled = false;
+    }
+  });
+  dialog.showModal();
+  $("#cd-name").focus();
+  return new Promise((resolve) => {
+    let made = null;
+    $("#cd-send").onclick = () => {
+      const name = $("#cd-name").value.trim();
+      if (!name) {
+        $("#cd-status").textContent = "Give your card a name.";
+        $("#cd-status").classList.add("bad");
+        return;
+      }
+      made = { name, bio: $("#cd-bio").value.trim() || undefined, photo };
+      dialog.close();
+    };
+    dialog.addEventListener("close", () => resolve(made), { once: true });
+  });
 }
 
 // --------------------------------------------------------------- Settings
 
 async function settingsView(panel, route, stale) {
+  // The kept choices, not a link's values for this visit: saving keeps only what is shown here.
+  const kept = {
+    node: store.get("node", DEFAULTS.node),
+    chain: store.get("chain", DEFAULTS.chain),
+    moniker: store.get("monikerChain", null) ?? MONIKER.chain.join("/"),
+  };
+  const fromLink = ["node", "chain", "moniker"].filter((p) => linked(p));
   paint(panel, stale, `
     <div class="top"><a class="back" href="#/you">${backIcon}You</a></div>
     <div class="form"><h1 class="title" style="font-size:22px">Settings</h1>
       <p class="small muted" style="margin:0">Rave reads from any node that serves its chain, and checks everything it reads against the chain's own hashes, so a node can refuse to answer but can't change what you see.</p>
-      <label class="field">Node<input id="s-node" value="${esc(settings.node)}" inputmode="url"></label>
-      <label class="field">Rave chain<input id="s-chain" value="${esc(settings.chain)}"></label>
-      <label class="field">Names (Moniker chain)<input id="s-moniker" value="${esc(settings.moniker)}"></label>
+      ${fromLink.length ? `<div class="notice" data-link-note>This visit reads the ${fromLink.map((p) => ({ node: "node", chain: "Rave chain", moniker: "Moniker chain" })[p]).join(" and ")} from the link you opened (${fromLink.map((p) => esc(settings[p])).join(", ")}). Below are your own choices; only they are kept.</div>` : ""}
+      <label class="field">Node<input id="s-node" value="${esc(kept.node)}" inputmode="url"></label>
+      <label class="field">Rave chain<input id="s-chain" value="${esc(kept.chain)}"></label>
+      <label class="field">Names (Moniker chain)<input id="s-moniker" value="${esc(kept.moniker)}"></label>
       <h2 style="font-size:16px;margin-top:8px">Your node, for photos</h2>
       <p class="small muted" style="margin:0">Photos aren't stored on the chain: your own Lattice node keeps them and serves them to readers. Give its operator address and the cookie it writes at each start (<code>chains/Nexus/.cookie</code>), and let it accept this site (<code>rpcAllowedOrigins</code>: <code>${esc(location.origin)}</code>).</p>
       <label class="field">Operator address<input id="s-own" value="${esc(settings.ownNode)}" placeholder="http://127.0.0.1:8080" inputmode="url"></label>

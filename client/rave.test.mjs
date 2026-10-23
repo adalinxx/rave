@@ -290,6 +290,44 @@ test("follows and label follows are each account's own", async () => {
   assert.equal(await c.write(BEN, write.follow(ANA, DEV)), false);
 });
 
+// --- cards
+
+test("a card is its account's own: name, a few words, a photo", async () => {
+  const c = chain();
+  assert.ok(await c.write(ANA, write.card(ANA, { name: "Ana Diaz", bio: "Tacos, mostly.", photo: "bafyphoto", extra: "dropped" })));
+  assert.deepEqual(await read.card(c.state, ANA), { name: "Ana Diaz", bio: "Tacos, mostly.", photo: "bafyphoto" });
+  assert.deepEqual(JSON.parse(c.kv.get(`user/${ANA}/card`)), { name: "Ana Diaz", bio: "Tacos, mostly.", photo: "bafyphoto" });
+  // Nobody writes another's card.
+  assert.equal(await c.write(BEN, write.card(ANA, { name: "Not Ana" })), false);
+  assert.deepEqual(await read.cards(c.state, [ANA, BEN]), [{ name: "Ana Diaz", bio: "Tacos, mostly.", photo: "bafyphoto" }, undefined]);
+  // A card with no name, or that isn't JSON, is no card.
+  assert.ok(await c.write(BEN, [[`user/${BEN}/card`, JSON.stringify({ bio: "nameless" })]]));
+  assert.equal(await read.card(c.state, BEN), undefined);
+  assert.ok(await c.write(CAT, [[`user/${CAT}/card`, "{"]]));
+  assert.equal(await read.card(c.state, CAT), undefined);
+  // Deleted with undefined.
+  assert.ok(await c.write(ANA, write.card(ANA, undefined)));
+  assert.equal(await read.card(c.state, ANA), undefined);
+});
+
+test("a card and a first review go in one transaction", async () => {
+  const c = await withPlace();
+  assert.ok(await c.write(BEN, [...write.card(BEN, { name: "Ben" }), ...write.review(BEN, "r1", P1, { stars: 4 })]));
+  assert.equal((await read.card(c.state, BEN)).name, "Ben");
+  assert.equal((await read.reviewOf(c.state, BEN, P1)).stars, 4);
+});
+
+test("a new post is stamped a few seconds back, so a fast clock isn't refused; an edit keeps its time", async () => {
+  const c = chain();
+  const before = Date.now();
+  const [created] = await write.changes(c.state, write.place(ANA, "p1", NOODLES));
+  const { time } = JSON.parse(created.newValue);
+  assert.ok(Math.abs(before - write.SKEW - time) < 1000, String(before - time));
+  c.kv.set(created.key, created.newValue);
+  const [edited] = await write.changes(c.state, write.place(ANA, "p1", { ...NOODLES, name: "Renamed" }));
+  assert.equal(JSON.parse(edited.newValue).time, time);
+});
+
 // --- what a reader sees
 
 const r = (author, stars, time, extra = {}) => ({ author, id: `${author}-r`, stars, time, on: P1, ...extra });

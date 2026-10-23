@@ -3,14 +3,24 @@
 // escaped on the way in.
 
 import { labelName } from "../client/trust.mjs";
+import { displayName, label } from "./vendor/moniker-sdk/src/index.mjs";
 
 export const esc = (s) =>
   String(s ?? "").replace(/[&<>"']/g, (ch) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[ch]);
 
-export const short = (address) => (address ? `${address.slice(0, 6)}…${address.slice(-4)}` : "");
+/**
+ * What Rave shows for an account, as text: its Rave card's name with the
+ * @handle Moniker verifies beside it, else the handle, else the end of the
+ * address (the Moniker SDK's `label`). `who` is `{ card?, handle? }`.
+ */
+export const nameOf = (address, who = {}) => label(address, { name: who.card?.name, handle: who.handle });
 
-/** An account's name: from their Moniker card, else their shortened address. */
-export const nameOf = (address, names) => names.get(address) || short(address);
+/** The same as HTML, the verified @handle styled apart. */
+export function bylineHTML(address, who = {}) {
+  const name = displayName(who.card?.name);
+  const handle = who.handle && `<span class="handle">@${esc(who.handle)}</span>`;
+  return name && handle ? `${esc(name)} ${handle}` : handle || esc(nameOf(address, who));
+}
 
 export const initials = (name) =>
   String(name).replace(/^@/, "").split(/\s+/).filter(Boolean).slice(0, 2).map((w) => [...w][0].toUpperCase()).join("") || "?";

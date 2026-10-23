@@ -1,7 +1,9 @@
 // Rave's acceptance tests: the real page (app/) in Chromium with the real
-// Selfhold wallet extension, against a private Lattice stack (stack.mjs)
-// seeded with the demo data (scripts/seed.mjs). Each test is one thing a
-// person does, checked by what the page then shows. Run with node --test; see README.
+// Selfhold wallet extension, against a private Lattice stack (stack.mjs: a
+// Rave chain and a Moniker chain) seeded with the demo data
+// (scripts/seed.mjs): eight people, each with a Rave card and a Moniker
+// handle shown. Each test is one thing a person does, checked by what the
+// page then shows. Run with node --test; see README.
 //
 //   LATTICE=<lattice-node>/.build/debug/lattice \
 //   LATTICE_WALLET=<lattice-wallet>/dist npm test
@@ -12,7 +14,8 @@ import { fileURLToPath } from "node:url";
 import { after, before, test as nodeTest } from "node:test";
 import { chromium, expect as baseExpect } from "playwright/test";
 import { seed } from "../../scripts/seed.mjs";
-import { newAccount, writeAs } from "./helpers.mjs";
+import { claim, pointName } from "../../app/vendor/moniker-sdk/src/index.mjs";
+import { newAccount, stateOf, submit, writeAs } from "./helpers.mjs";
 import * as write from "../../client/write.mjs";
 import { start } from "./stack.mjs";
 
@@ -46,6 +49,12 @@ after(async () => {
 const MARIGOLD = () => ({ author: people["Dana Okafor"].address, id: "marigold" });
 const DUPLICATE = () => ({ author: people["Mo Haddad"].address, id: "marigold2" });
 const placeHash = (p) => `#/place/${p.author}/${p.id}`;
+/** A new account with a Rave card named `name`, written outside the page. */
+async function newPerson(name = "Someone New") {
+  const who = newAccount();
+  await writeAs(stack.info.node, stack.info.chain, who, write.card(who.address, { name }));
+  return who;
+}
 const AREA = { lat: 40.7415, lon: -73.9887, zoom: 17 };
 
 /** The page, pointed at the stack, the map at `view`; tiles are not fetched. */
@@ -114,6 +123,15 @@ async function withWallet(who, { view, viewport = { width: 1280, height: 900 } }
   await prepare(context, view);
   const page = context.pages()[0] ?? (await context.newPage());
   return { context, page };
+}
+
+/** Fills in the card dialog the page opened, and saves the card. */
+async function fillCard(page, name, bio) {
+  const dialog = page.getByRole("dialog", { name: /Rave card|Edit your card/ });
+  await expect(dialog).toBeVisible();
+  await dialog.getByLabel("Name").fill(name);
+  if (bio) await dialog.getByLabel(/A few words about you/).fill(bio);
+  await dialog.getByRole("button", { name: "Save card" }).click();
 }
 
 /** Connects the page to Selfhold from the You tab, as a person would. */
@@ -193,8 +211,10 @@ test("a visitor reads a place: two scores, recent count, star bars that filter, 
   await expect(page.locator(".score").nth(1).locator("b")).toHaveText("3.7");
   await expect(page.locator(".score").first()).toContainText("Connect to see people you follow");
   await expect(page.locator(".recent")).toHaveText("7 reviews in the last 3 months");
-  // Names come from Moniker cards.
-  await expect(page.locator("article.review", { hasText: "Hand-pulled noodles" })).toContainText("Dana Okafor");
+  // Bylines: the Rave card's name, and the handle Moniker verifies.
+  const dana = page.locator("article.review", { hasText: "Hand-pulled noodles" }).locator(".who-line .id a");
+  await expect(dana).toHaveText("Dana Okafor @dana");
+  await expect(dana.locator(".handle")).toHaveText("@dana");
   // Someone who follows no labelers sees every review as written.
   await expect(page.locator("article.review")).toHaveCount(7);
   await expect(page.locator("[data-hidden-note]")).toHaveCount(0);
@@ -240,11 +260,15 @@ test("a node that can't be reached is said so, with Try again", async ({ watch }
   await page.goto(`${stack.info.app}?node=${encodeURIComponent("http://127.0.0.1:9")}${placeHash(MARIGOLD())}`);
   await expect(page.locator("#panel [role=alert]")).toContainText(/Couldn't reach|No node serves/);
   await expect(page.getByRole("button", { name: "Try again" })).toBeVisible();
+  // A link's node holds for that visit only: the next visit reads the node chosen in Settings.
+  assert.equal(await page.evaluate(() => JSON.parse(localStorage.getItem("rave:node"))), stack.info.node);
+  await page.goto(stack.info.app + placeHash(MARIGOLD()));
+  await expect(page.locator("h1.title")).toHaveText("Marigold Noodle Bar");
 });
 
 // ------------------------------------------------------------- writing
 
-test("a newcomer with no coins connects Selfhold, adds a place and reviews it; both land", async ({ watch }) => {
+test("a newcomer with no coins connects Selfhold, makes their card as they add a place, and reviews it; all land", async ({ watch }) => {
   const me = newAccount();
   const { context, page } = await person(watch, me, { view: { lat: 40.7395, lon: -73.9921, zoom: 18 } });
   await connect(page);
@@ -254,6 +278,8 @@ test("a newcomer with no coins connects Selfhold, adds a place and reviews it; b
   await page.locator("summary").click();
   await page.locator("#a-address").fill("1 W 20th St");
   await page.getByRole("button", { name: "Add place" }).click();
+  // No card yet: the page asks for one, and sends it with the place.
+  await fillCard(page, "Kim Lee", "Lunch, mostly.");
   // On to the review, the place shown as waiting until its block lands.
   await expect(page.locator("#star-word")).toHaveText("Tap a star");
   await expect(page.getByRole("button", { name: "Post review" })).toBeDisabled();
@@ -265,6 +291,8 @@ test("a newcomer with no coins connects Selfhold, adds a place and reviews it; b
   await landed(page);
   await expect(page.locator(".score").nth(1)).toContainText("Everyone · 1");
   await expect(page.locator("article.review .rv-meta time")).toBeVisible();
+  await expect(page.locator("article.review .who-line .id a")).toHaveText("Kim Lee");
+  await expect(page.locator(".facts")).toContainText("added by Kim Lee");
   assert.deepEqual(context.answers, ["Connect", "Sign write", "Sign write"]);
   // It is on the map's list for anyone now.
   const other = await visitor(watch, { lat: 40.7395, lon: -73.9921, zoom: 17 });
@@ -287,7 +315,7 @@ test("adding a place that's already listed nearby offers the existing ones first
 });
 
 test("only a place's author can edit its details; moving the pin moves the place", async ({ watch }) => {
-  const me = newAccount();
+  const me = await newPerson("Kiosk Keeper");
   const at = { lat: 40.7388, lon: -73.9930 };
   await writeAs(stack.info.node, stack.info.chain, me, write.place(me.address, "kiosk", { name: "News Kiosk", category: "Shop", ...at }));
   const { page } = await person(watch, me);
@@ -318,7 +346,7 @@ test("only a place's author can edit its details; moving the pin moves the place
 });
 
 test("a label is text, never markup", async ({ watch }) => {
-  const labeller = newAccount();
+  const labeller = await newPerson('<img src=x onerror="window.pwned=2">');
   const reader = newAccount();
   const ninth = { author: people["Tess Ward"].address, id: "ninth" };
   const target = { author: people["Ari Chen"].address, id: "r-ninth" };
@@ -328,13 +356,14 @@ test("a label is text, never markup", async ({ watch }) => {
   await connect(page);
   await page.goto(stack.info.app + placeHash(ninth));
   const folded = page.locator("article.review .folded");
-  await expect(folded).toContainText('Labelled <img src=x onerror="window.pwned=1">');
+  // The label and the labeller's card name are text, never markup.
+  await expect(folded).toContainText('Labelled <img src=x onerror="window.pwned=1"> by <img src=x onerror="window.pwned=2">');
   assert.equal(await page.locator("#panel img[src=x]").count(), 0);
   assert.equal(await page.evaluate(() => window.pwned), undefined);
 });
 
 test("a reviewer edits their review (it keeps its date and says Edited), then deletes it", async ({ watch }) => {
-  const me = newAccount();
+  const me = await newPerson();
   const { page } = await person(watch, me);
   await connect(page);
   await page.goto(stack.info.app + placeHash(MARIGOLD()) + "/review");
@@ -363,7 +392,7 @@ test("a reviewer edits their review (it keeps its date and says Edited), then de
 });
 
 test("a write declined in Selfhold sends nothing and says so", async ({ watch }) => {
-  const { context, page } = await person(watch, newAccount());
+  const { context, page } = await person(watch, await newPerson());
   await connect(page);
   context.decline = true;
   await page.goto(stack.info.app + placeHash(MARIGOLD()) + "/review");
@@ -377,7 +406,7 @@ test("a write declined in Selfhold sends nothing and says so", async ({ watch })
 });
 
 test("helpful marks count once per person, and replies sit under the review", async ({ watch }) => {
-  const { page } = await person(watch, newAccount());
+  const { page } = await person(watch, await newPerson());
   await connect(page);
   await page.goto(stack.info.app + placeHash(MARIGOLD()));
   const card = page.locator("article.review", { hasText: "Dan dan noodles" });
@@ -396,7 +425,7 @@ test("helpful marks count once per person, and replies sit under the review", as
 });
 
 test("a reviewer whose own node keeps photos adds one, and anyone sees it", async ({ watch }) => {
-  const { page } = await person(watch, newAccount());
+  const { page } = await person(watch, await newPerson());
   await connect(page);
   await page.goto(`${stack.info.app}#/settings`);
   await page.getByLabel("Operator address").fill(stack.info.rpc);
@@ -432,13 +461,162 @@ test("without a node of their own, a reviewer is told where photos are kept", as
   await expect(page.getByRole("link", { name: "Add your node in Settings" })).toBeVisible();
 });
 
+// ------------------------------------------------------- cards and handles
+
+test("someone makes their card, shows a handle they own, and their review's byline shows both", async ({ watch }) => {
+  const me = newAccount();
+  // They hold @jo_park on Moniker already, pointed nowhere.
+  await submit(stack.info.node, stack.info.moniker, me, (await claim(await stateOf(stack.info.node, stack.info.moniker), me.address, "jo_park")).actions);
+  const { context, page } = await person(watch, me);
+  await connect(page);
+  await page.getByRole("button", { name: "Make your card" }).click();
+  await fillCard(page, "Jo Park", "Here for the noodles.");
+  await expect(page.locator(".profile h1")).toHaveText("Jo Park");
+  // Reloaded before its block lands, the page doesn't ask for a card again.
+  await page.reload();
+  await expect(page.getByRole("button", { name: "Edit your card" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Make your card" })).toHaveCount(0);
+  await landed(page);
+  // The handle: offered from their Moniker names, shown in one approval.
+  await page.getByRole("button", { name: "Use a handle" }).click();
+  const dialog = page.getByRole("dialog", { name: "Use a handle" });
+  await expect(dialog.getByRole("radio", { name: "@jo_park" })).toBeChecked();
+  await dialog.getByRole("button", { name: "Use handle" }).click();
+  await expect(dialog).toBeHidden();
+  await expect(page.getByRole("link", { name: "@jo_park on Moniker" })).toBeVisible();
+  await expect(page.locator(".profile h1")).toHaveText("Jo Park @jo_park");
+  // A review; its byline shows the card's name and the handle.
+  const pho = `#/place/${people["Ari Chen"].address}/pholinh`;
+  await page.goto(stack.info.app + pho + "/review");
+  await page.getByRole("radio", { name: "4 of 5 stars" }).click();
+  await page.locator("#body").fill("Broth was deep.");
+  await page.getByRole("button", { name: "Post review" }).click();
+  await expect(page.locator("article.review", { hasText: "Broth was deep." })).toBeVisible();
+  await landed(page);
+  assert.deepEqual(context.answers, ["Connect", "Sign write", "Sign write", "Sign write"]);
+  // Anyone reading sees the same byline, and never the account.
+  const other = await visitor(watch);
+  await other.goto(stack.info.app + pho);
+  const byline = other.locator("article.review", { hasText: "Broth was deep." }).locator(".who-line .id a");
+  await expect(byline).toHaveText("Jo Park @jo_park");
+  assert.ok(!(await other.locator("#panel").innerText()).includes(me.address.slice(0, 12)), "the account isn't shown");
+  // Jo points the name at someone else: a page already open checks again and drops it.
+  const elsewhere = newAccount();
+  await submit(stack.info.node, stack.info.moniker, me, (await pointName(await stateOf(stack.info.node, stack.info.moniker), me.address, "jo_park", elsewhere.address)).actions);
+  await expect(async () => {
+    await other.evaluate(() => (location.hash = "#/"));
+    await other.evaluate((hash) => (location.hash = hash), pho);
+    await expect(byline).toHaveText("Jo Park", { timeout: 5000 });
+  }).toPass({ timeout: 60_000 });
+});
+
+test("a card name can't pass for a handle: no @ anywhere, no hidden or reversing marks", async ({ watch }) => {
+  const harbor = { author: people["Mo Haddad"].address, id: "harborhw" };
+  // [card name, what the byline says, the review's words]
+  const fakes = [
+    ["@dana", "dana", "Totally Dana."],
+    ["Dana Okafor @dana", "Dana Okafor dana", "Dana here, honest."],
+    ["\u202Eanad\u200B @dana", "anad dana", "Reversed Dana."],
+  ];
+  await Promise.all(fakes.map(async ([name, , body], i) => {
+    const faker = await newPerson(name);
+    await writeAs(stack.info.node, stack.info.chain, faker, write.review(faker.address, `r-fake${i}`, harbor, { stars: 5, body }));
+  }));
+  const page = await visitor(watch);
+  await page.goto(stack.info.app + `#/place/${harbor.author}/harborhw`);
+  for (const [, shown, body] of fakes) {
+    const byline = page.locator("article.review", { hasText: body }).locator(".who-line .id a");
+    await expect(byline).toHaveText(shown);
+    await expect(byline.locator(".handle")).toHaveCount(0);
+    assert.ok(!/[@\u202E\u200B]/.test(await byline.innerText()), shown);
+  }
+});
+
+test("claiming a free handle shows it in one approval; declining Stop showing it changes nothing", async ({ watch }) => {
+  const { context, page } = await person(watch, await newPerson("Pat Work"));
+  await connect(page);
+  await page.getByRole("button", { name: "Use a handle" }).click();
+  const dialog = page.getByRole("dialog", { name: "Use a handle" });
+  await expect(dialog).toContainText("You have no names on Moniker yet.");
+  await dialog.getByLabel("Or claim a free one").fill("@pat_work");
+  await dialog.getByRole("button", { name: "Use handle" }).click();
+  await expect(page.getByRole("link", { name: "@pat_work on Moniker" })).toBeVisible();
+  // Declined in Selfhold: said so, and the button works again.
+  context.decline = true;
+  await page.getByRole("button", { name: "Stop showing it" }).click();
+  await expect(page.locator(".toast.bad")).toContainText("You declined it in Selfhold.");
+  await expect(page.getByRole("button", { name: "Stop showing it" })).toBeEnabled();
+  context.decline = false;
+  // Approved, it goes.
+  await page.getByRole("button", { name: "Stop showing it" }).click();
+  await expect(page.getByRole("button", { name: "Use a handle" })).toBeVisible();
+  await expect(page.locator(".profile h1")).toHaveText("Pat Work");
+  assert.deepEqual(context.answers, ["Connect", "Sign write", "declined Sign write", "Sign write"]);
+});
+
+test("a link's chains hold for its visit: Settings shows and keeps only the reader's own", async ({ watch }) => {
+  const page = await visitor(watch);
+  await page.goto(`${stack.info.app}?moniker=Nexus/elsewhere#/settings`);
+  await expect(page.locator("[data-link-note]")).toContainText("Moniker chain from the link you opened (Nexus/elsewhere)");
+  await expect(page.getByLabel("Names (Moniker chain)")).toHaveValue(stack.info.moniker);
+  await page.getByRole("button", { name: "Save" }).click();
+  await page.waitForLoadState();
+  assert.equal(await page.evaluate(() => JSON.parse(localStorage.getItem("rave:monikerChain"))), stack.info.moniker);
+});
+
+test("a broken card counts as none: the next write asks for a card", async ({ watch }) => {
+  const me = newAccount();
+  await writeAs(stack.info.node, stack.info.chain, me, [[`user/${me.address}/card`, "{not json"]]);
+  const { page } = await person(watch, me);
+  await connect(page);
+  await expect(page.getByRole("button", { name: "Make your card" })).toBeVisible();
+  await page.goto(stack.info.app + `#/place/${people["Lin Wei"].address}/parkcuts/review`);
+  await page.getByRole("radio", { name: "3 of 5 stars" }).click();
+  await page.getByRole("button", { name: "Post review" }).click();
+  await fillCard(page, "Fixed Card");
+  await expect(page.locator("article.review", { hasText: "Fixed Card" })).toBeVisible();
+  await landed(page);
+});
+
+test("a write is refused when Selfhold's account isn't the one the page shows", async ({ watch }) => {
+  const me = await newPerson("Shown Person");
+  const { context, page } = await person(watch, me);
+  await connect(page);
+  await page.getByRole("button", { name: "Use a handle" }).click();
+  const dialog = page.getByRole("dialog", { name: "Use a handle" });
+  await dialog.getByLabel("Or claim a free one").fill("not_mine");
+  // Behind the page's back, Selfhold gets a second account and this site is connected to it in another tab.
+  const other = newAccount();
+  const origin = context.serviceWorkers()[0].url().split("/").slice(0, 3).join("/");
+  const popup = await context.newPage();
+  await popup.goto(`${origin}/popup/index.html`);
+  const imported = await popup.evaluate((privHex) => chrome.runtime.sendMessage({ type: "importKey", privHex }), other.keyHex);
+  assert.ok(imported?.ok, imported?.error);
+  await popup.close();
+  const tab = await context.newPage();
+  await tab.goto(`${stack.info.app}#/settings`);
+  assert.equal(await tab.evaluate(async () => {
+    await window.lattice.disconnect();
+    return window.lattice.connect();
+  }), other.address);
+  await tab.close();
+  await page.bringToFront();
+  await dialog.getByRole("button", { name: "Use handle" }).click();
+  await expect(dialog.locator("#hd-status")).toContainText("Selfhold is connected to another account than this page showed.");
+  assert.deepEqual(context.answers, ["Connect", "Connect"]);
+  assert.equal(await (await stateOf(stack.info.node, stack.info.moniker)).get("name/not_mine"), undefined);
+});
+
 // ------------------------------------------------------- choosing whom to trust
 
 test("following someone puts their score first and their reviews in Following", async ({ watch }) => {
-  const { page } = await person(watch, newAccount());
+  const { page } = await person(watch, await newPerson());
   await connect(page);
   await page.goto(`${stack.info.app}#/u/${people["Dana Okafor"].address}`);
-  await expect(page.locator("h1.title")).toHaveText("Dana Okafor");
+  await expect(page.locator("h1.title")).toHaveText("Dana Okafor @dana");
+  await expect(page.locator(".profile")).toContainText("Eats around Flatiron most nights.");
+  await expect(page.getByRole("link", { name: "@dana on Moniker" })).toBeVisible();
+  assert.ok(!(await page.locator("#panel").innerText()).includes(people["Dana Okafor"].address.slice(0, 12)), "the account isn't shown");
   await expect(page.locator(".history")).toContainText("6 reviews");
   await page.getByRole("button", { name: "Follow", exact: true }).click();
   await expect(page.getByRole("button", { name: "Following" })).toBeVisible();
@@ -454,7 +632,7 @@ test("following someone puts their score first and their reviews in Following", 
 });
 
 test("using someone's labels hides and folds what they labelled, and the reader chooses what each label does", async ({ watch }) => {
-  const { page } = await person(watch, newAccount());
+  const { page } = await person(watch, await newPerson());
   await connect(page);
   await page.goto(`${stack.info.app}#/u/${people["Clean Plate"].address}`);
   await page.getByRole("button", { name: "Use their labels" }).click();
@@ -471,8 +649,8 @@ test("using someone's labels hides and folds what they labelled, and the reader 
   await expect(page.locator("article.review", { hasText: "Avoid." })).toBeVisible();
   // On You: spam shows, paid hides.
   await page.getByRole("link", { name: "You", exact: true }).click();
-  await page.getByRole("radiogroup", { name: "spam from Clean Plate" }).getByRole("radio", { name: "Show" }).click();
-  await page.getByRole("radiogroup", { name: "paid for from Clean Plate" }).getByRole("radio", { name: "Hide" }).click();
+  await page.getByRole("radiogroup", { name: "spam from Clean Plate @cleanplate" }).getByRole("radio", { name: "Show" }).click();
+  await page.getByRole("radiogroup", { name: "paid for from Clean Plate @cleanplate" }).getByRole("radio", { name: "Hide" }).click();
   await page.goto(stack.info.app + placeHash(MARIGOLD()));
   await expect(page.locator("article.review", { hasText: "Avoid." })).toBeVisible();
   await expect(page.locator("article.review", { hasText: "Amazing!!!" })).toHaveCount(0);
@@ -480,7 +658,7 @@ test("using someone's labels hides and folds what they labelled, and the reader 
 });
 
 test("a duplicate listing is shown as such to people who use the labeller's labels, with why", async ({ watch }) => {
-  const { page } = await person(watch, newAccount());
+  const { page } = await person(watch, await newPerson());
   await connect(page);
   await page.goto(`${stack.info.app}#/u/${people["Dana Okafor"].address}`);
   await page.getByRole("button", { name: "Use their labels" }).click();
@@ -495,7 +673,7 @@ test("a duplicate listing is shown as such to people who use the labeller's labe
 });
 
 test("labelling a place closed is a reply anyone can see, applied for those who use your labels", async ({ watch }) => {
-  const labeller = newAccount();
+  const labeller = await newPerson("Block Watch");
   const { page } = await person(watch, labeller);
   await connect(page);
   await page.goto(stack.info.app + `#/place/${people["Dana Okafor"].address}/lowtide`);
@@ -514,7 +692,7 @@ test("labelling a place closed is a reply anyone can see, applied for those who 
 });
 
 test("Following suggests people who rated like you, and following one is a tap", async ({ watch }) => {
-  const me = newAccount();
+  const me = await newPerson();
   const { page } = await person(watch, me);
   await connect(page);
   // Two reviews like Dana's: Marigold 4, Pho Linh 5.
