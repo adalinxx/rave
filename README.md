@@ -144,7 +144,7 @@ Handles come from Moniker through the Moniker SDK (see Cards and handles).
 
 `chain/spec.json` is the spec a Rave chain is created from; it names the
 policy module by CID, and `chain/policy.wasm` is that module. It is Stoa's
-module, byte for byte ([Stoa](https://github.com/adalinxx/stoa)
+module, byte for byte ([Stoa](https://github.com/stoasocial/stoa)
 `policy/`): the same ownership and post-time rule.
 
 ```sh
