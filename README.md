@@ -152,7 +152,7 @@ lattice child create Nexus/rave --spec chain/spec.json --policy-module chain/pol
 ```
 
 The trial chain is `Nexus/testnet/rave-186079`, served by
-`lattice-testnet-apps-iad.fly.dev` and `lattice-testnet-apps-ams.fly.dev`.
+`lattice-testnet-apps-iad.fly.dev` and `ams.testnet.lattice.build`.
 
 ## Tests
 
